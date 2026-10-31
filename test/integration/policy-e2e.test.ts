@@ -24,8 +24,11 @@ describe.skipIf(!allServersUp(await checkAllServers()))('Policy engine E2E', () 
   it('viewer cannot run privileged commands', () => {
     expect(policy.evaluate('sudo whoami', profiles.viewer).decision).toBe('deny');
   });
-  it('operator can run safe commands', () => {
-    expect(policy.evaluate('npm install', profiles.operator).decision).toBe('allow');
+  it('operator can run proven read-only commands without approval', () => {
+    expect(policy.evaluate('df -h', profiles.operator).decision).toBe('allow');
+  });
+  it('operator unclassified writes require approval', () => {
+    expect(policy.evaluate('npm install', profiles.operator).decision).toBe('require-approval');
   });
   it('operator destructive requires approval', () => {
     expect(policy.evaluate('rm -rf /tmp/test', profiles.operator).decision).toBe('require-approval');
