@@ -47,6 +47,8 @@ export class PolicyRefusedError extends Error {
 
 export interface ToolDeps {
   server: McpServer;
+  /** Shared across all MCP sessions; production supplies a durable store. */
+  quota?: CommandQuota;
   registry: ConnectionRegistry;
   policy: PolicyEngine;
   audit: AuditStore;
@@ -76,8 +78,15 @@ export interface ToolDeps {
  * and audit store. Tool groups receive the result and never touch those four
  * directly, so there is exactly one path from caller input to a remote command.
  */
-export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
-  const quota = new CommandQuota();
+const registryQuotas = new WeakMap<ConnectionRegistry, CommandQuota>();
+
+export function createPipeline({ server, registry, policy, audit, quota: suppliedQuota }: ToolDeps) {
+  let quota = suppliedQuota ?? registryQuotas.get(registry);
+  if (!quota) {
+    quota = new CommandQuota();
+    registryQuotas.set(registry, quota);
+  }
+  const commandQuota = quota;
   // Both read live: a reload changes the TTL, and moves the generation that retires
   // every grant given under the rules before it.
   const grants = new ApprovalGrants(
@@ -423,7 +432,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       // read from the connection's live profile, not the one captured above: a reload
       // during the policy or approval await swaps it in place.
       const limit = conn.profile.commandQuotaPerDay;
-      const budget = quota.consume(profileName, limit);
+      const budget = commandQuota.consume(profileName, limit);
       if (!budget.allowed) {
         throw new PolicyRefusedError(
           `QUOTA_EXCEEDED: profile "${profileName}" has used its ${limit} commands ` +

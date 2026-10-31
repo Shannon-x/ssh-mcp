@@ -415,7 +415,7 @@ describe('a disqualifying flag is still noticed behind an exec wrapper', () => {
     expect(result.decision).toBe('deny');
   });
 
-  it('does not escalate a harmless wrapped command for a profile that already holds safe', () => {
+  it('keeps a wrapped reader in safe, but requires approval because it is not proven read-only', () => {
     // A `readOnly` profile can never confirm this: `env`/`nohup` are exec
     // wrappers, never readers, so a wrapped command is never classified
     // `read-only` regardless of what it wraps (documented above
@@ -424,7 +424,8 @@ describe('a disqualifying flag is still noticed behind an exec wrapper', () => {
     // newly flag a wrapped command with no disqualifying flag — is checked
     // against a profile that already holds `safe` outright.
     for (const command of ['env sort /etc/hostname', 'nohup find /etc -name "*.conf"']) {
-      expect(engine.evaluate(command, adminProd).decision, command).toBe('allow');
+      expect(engine.evaluate(command, adminProd).commandClass, command).toBe('safe');
+      expect(engine.evaluate(command, adminProd).decision, command).toBe('require-approval');
     }
   });
 });

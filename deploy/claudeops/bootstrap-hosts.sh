@@ -3,23 +3,18 @@
 #
 # 在你自己的电脑上跑，用你现在就能登录这些主机的方式（你的 ~/.ssh/config、你的密钥、你的 sudo）。
 # 默认只看不改（dry-run），打印每台机器会改什么；确认无误后加 --apply 才真正执行。
-# 可以反复跑：已经是目标状态的东西不会再动，也不会重载 sshd。
+# apply 使用事务备份和定时回滚，不能代替服务商控制台或独立管理员救援入口。
+#   - 只约束专用账号；不再接受全局 --harden。
+#   - 写入前检查账号、权限组和 sudoers；已有密码或 sudo 授权需先人工审查。
+#   - 账号、补充组、过期状态、公钥、sudoers、sshd 一起回滚；每事务独立锁和计时器。
+#   - 重载后用全新管理员连接验证，再提交事务；未确认时定时回滚。
+#   - 回滚仍可能因系统故障失败：保留救援通道并核查事务结果。
 #
-# 不会把你锁在外面：
-#   - sshd 只加 Match 段，只约束专用账号；全局加固（禁 root/禁密码）要另加 --harden，
-#     而且你用 root 登录或没有 authorized_keys 时脚本拒绝加固。
-#   - 改 sshd 前备份，`sshd -t` 不通过就还原，不重载。
-#   - 所有操作走一条复用的主连接；重载 sshd 不会断开已有连接。
-#   - 重载后用一条全新的连接测试你还能登录；失败立刻通过主连接回滚。
-#   - 远端还挂着一个定时回滚（默认 180 秒）：万一本机断网没来得及确认，到点自动还原。
-#   - sudoers 先在临时文件上 `visudo -cf`，装上后再 `visudo -c` 全量检查，不过就撤回。
-#
-# 本机需要 bash 3.2 以上（macOS 自带的就行）和 OpenSSH；远端需要 Linux、bash、base64、sudo 或 root。
+# 本机需要 bash 3.2 以上（macOS 自带的就行）和 OpenSSH；远端需要 Linux、bash、base64、sudo 或 root；apply 还需要 flock、systemd 和 visudo。
 #
 # 用法：
 #   ./bootstrap-hosts.sh --hosts hosts.txt --pubkey claudeops_ed25519.pub --control-ip 203.0.113.10
 #   ./bootstrap-hosts.sh ... --apply                 # 真正执行
-#   ./bootstrap-hosts.sh ... --apply --harden        # 同时禁 root 登录和密码登录（全局）
 #   ./bootstrap-hosts.sh ... --lock --apply          # 急停：封掉专用账号、踢掉它的会话
 #   ./bootstrap-hosts.sh ... --apply --unlock        # 解封后按模板重新装好
 #
@@ -49,10 +44,10 @@ usage() {
   --pubkey FILE         控制机上 ssh-mcp 用的公钥，可以给多次（换钥时新旧一起给）
   --control-ip IP       控制机的出口地址，只有它能用专用账号登录（必填，可写 CIDR）
   --user NAME           专用账号名，默认 claudeops
-  --extra-groups G,G    额外加入的组，例如 systemd-journal（让它不用 sudo 就能读 journalctl）
+  --extra-groups G,G    仅允许 systemd-journal（日志可能包含敏感信息，先核对需要）
   --only NAME           只处理清单里这一台
   --apply               真正执行；不加就是 dry-run
-  --harden              另外安装 05-hardening.conf（全局禁 root、禁密码登录）
+  --harden              已禁用：全局 SSH 加固须独立规划
   --lock                急停：封账号、删公钥、杀会话（配合 --apply）
   --unlock              解除 --lock 设的账号过期
   --confirm-timeout S   远端定时回滚的秒数，默认 180
@@ -94,7 +89,12 @@ if [ "$LOCK" = 1 ]; then MODE=lock; elif [ "$APPLY" = 1 ]; then MODE=apply; else
 [ "$CLAUDEOPS_USER" != root ] || die "专用账号不能是 root"
 [[ $CONTROL_IP =~ ^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$ ]] || die "--control-ip 要写 IP 或 CIDR，例如 203.0.113.10"
 [[ $CONFIRM_TIMEOUT =~ ^[0-9]+$ ]] && [ "$CONFIRM_TIMEOUT" -ge 30 ] || die "--confirm-timeout 至少 30 秒"
+[ "$HARDEN" = 0 ] || die "--harden 已停用；请独立规划全局 SSH 加固，保留管理员入口"
 [ -z "$EXTRA_GROUPS" ] || [[ $EXTRA_GROUPS =~ ^[a-z_][a-z0-9_-]*(,[a-z_][a-z0-9_-]*)*$ ]] || die "--extra-groups 格式不对"
+
+for g in ${EXTRA_GROUPS//,/ }; do
+  [ "$g" = systemd-journal ] || die "--extra-groups 仅允许 systemd-journal，其他组须独立权限审查"
+done
 
 for f in sshd_config.d/10-claudeops.conf sshd_config.d/05-hardening.conf sudoers.d/claudeops; do
   [ -r "$SCRIPT_DIR/$f" ] || die "模板缺失：$SCRIPT_DIR/$f"
@@ -134,238 +134,270 @@ SUDO_B64=$(render sudoers.d/claudeops | b64)
 remote_body() {
   cat <<'REMOTE'
 set -euo pipefail
-umask 022
-APPLY_N=$APPLY
-STATE=/run/claudeops-bootstrap
-PENDING=$STATE/confirm/pending
+umask 077
 ADMIN=${SUDO_USER:-root}
 SSHD=$(command -v sshd || echo /usr/sbin/sshd)
 KEYDIR=/etc/ssh/authorized_keys
 DROPIN=/etc/ssh/sshd_config.d
-SSHD_CHANGED=0
-FAILED=0
-
-say()  { printf '  %-6s %s\n' "$1" "$2"; }
-fail() { say 错误 "$1"; FAILED=1; }
-dec()  { printf '%s' "$1" | base64 -d; }
-# 计划模式只说不做：CHANGE 行都以“将”开头。
-act()  { if [ "$APPLY_N" = 1 ]; then say 修改 "$1"; return 0; else say 将要 "$1"; return 1; fi; }
-
+SUDOERS=/etc/sudoers.d/$U
+BASE=/run/claudeops-bootstrap
+STATE=
+ARMED=0
+say() { printf '  %-6s %s\n' "$1" "$2"; }
+die_remote() { say 错误 "$1"; exit 3; }
+dec() { printf '%s' "$1" | base64 -d; }
 same_content() { [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]; }
-
-# 写到同目录的临时文件再改名，读的一方永远看不到写了一半的文件。
+check_groups() {
+  local g
+  for g in $1; do
+    case $g in sudo|wheel|admin|root|docker|lxd|lxc|incus|libvirt|disk|shadow|kvm)
+      die_remote "$U 属于高权限组 $g；没有写入授权，请先人工处理" ;;
+    esac
+  done
+}
+reload_sshd() {
+  local unit
+  for unit in ssh sshd; do
+    if systemctl is-active --quiet "$unit"; then systemctl reload "$unit"; return; fi
+  done
+  die_remote "未找到活动的 ssh/sshd systemd 服务"
+}
 put_file() {
   local path=$1 content=$2 mode=$3 tmp
   tmp=$(mktemp "$(dirname "$path")/.$(basename "$path").XXXXXX")
   printf '%s\n' "$content" > "$tmp"
-  chown root:root "$tmp"; chmod "$mode" "$tmp"
-  mv -f "$tmp" "$path"
+  chown root:root "$tmp"; chmod "$mode" "$tmp"; mv -f "$tmp" "$path"
 }
-
-reload_sshd() {
-  local unit
-  for unit in ssh sshd; do
-    if systemctl is-active --quiet "$unit" 2>/dev/null; then systemctl reload "$unit"; return; fi
-  done
-  if [ -r /run/sshd.pid ]; then kill -HUP "$(cat /run/sshd.pid)"; return; fi
-  say 提示 "没找到在跑的 sshd 服务，新配置会在 sshd 下次启动时生效"
-}
-
 printf '%s\n' "--- $(hostname)（以 $ADMIN 的身份登录，角色 $ROLE）"
+[ "$ADMIN" != "$U" ] || die_remote "不能修改当前用于救援登录的账号"
+[ "$HARDEN" = 0 ] || die_remote "此脚本不再做全局 --harden；请独立规划管理员入口加固"
+for g in ${EXTRA_GROUPS//,/ }; do
+  [ "$g" = systemd-journal ] || die_remote "额外组只允许 systemd-journal；其他组需独立权限审查"
+  getent group "$g" >/dev/null || die_remote "额外组 $g 不存在"
+done
 
-if [ "$MODE" = lock ]; then
-  if ! id "$U" >/dev/null 2>&1; then say 跳过 "账号 $U 不存在"; exit 0; fi
-  if act "封账号 $U（设为已过期，公钥登录也会被拒），停用它的公钥，杀掉它的所有进程"; then
-    usermod --expiredate 1 "$U"
-    if [ -f "$KEYDIR/$U" ]; then mv -f "$KEYDIR/$U" "$KEYDIR/$U.disabled-$(date +%Y%m%d%H%M%S)"; fi
-    pkill -KILL -u "$U" 2>/dev/null || true
-  fi
+# Dry-run does not create locks, accounts, files, or timers on the target.
+EXISTED=0
+PRE_UID=
+if id "$U" >/dev/null 2>&1; then
+  EXISTED=1
+  PRE_UID=$(id -u "$U")
+  [ "$PRE_UID" != 0 ] && [ "$PRE_UID" != "$(id -u "$ADMIN")" ] || die_remote "专用账号不能使用 root 或管理员 UID"
+  if [ "$MODE" != lock ]; then check_groups "$(id -nG "$U")"; fi
+fi
+if [ "$MODE" = lock ] && [ "$APPLY" = 0 ]; then
+  say 将要 "使 $U 过期、移走专用公钥并停止该 UID 进程；不会终止已提权的 root/systemd 任务"
   exit 0
 fi
-
-[ -x "$SSHD" ] || { fail "找不到 sshd"; exit 3; }
-if ! grep -Eqi '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config; then
-  fail "/etc/ssh/sshd_config 里没有 Include /etc/ssh/sshd_config.d/*.conf，drop-in 不会生效。先手工加上再跑"
-  exit 3
-fi
-
-# 1. 账号 -----------------------------------------------------------------
-if id "$U" >/dev/null 2>&1; then
-  say 已有 "账号 $U"
-else
-  if act "创建账号 $U（不设密码，只能用公钥登录）"; then
-    useradd -m -s /bin/bash -c "ssh-mcp (Claude)" "$U"
+if [ "$MODE" != lock ]; then
+  [ -x "$SSHD" ] || die_remote "找不到 sshd"
+  grep -Eqi '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config \
+    || die_remote "主配置缺少 sshd_config.d Include"
+  "$SSHD" -t || die_remote "当前 sshd 配置已无效，先人工修复"
+  command -v visudo >/dev/null || die_remote "需要 visudo 验证 sudo 权限边界"
+  visudo -c >/dev/null || die_remote "当前 sudoers 已无效，先人工修复"
+  if [ "$EXISTED" = 1 ]; then
+    [ "$(getent shadow "$U" | cut -d: -f2)" = '*' ] \
+      || die_remote "已有账号不是无密码专用账号（密码字段须为 *）；不会自动覆盖其密码"
+    expiry=$(getent shadow "$U" | cut -d: -f8)
+    if [ -n "$expiry" ] && [ "$expiry" -le "$(( $(date +%s) / 86400 ))" ] && [ "$UNLOCK" != 1 ]; then
+      die_remote "账号已过期；确认恢复后使用 --unlock"
+    fi
+    # Existing sudo grants (including a previous test installation) require an
+    # independent privilege review before replacing account authorization.
+    if LC_ALL=C sudo -n -l -U "$U" >/dev/null 2>&1; then
+      die_remote "已有账号具备 sudo 权限；请先独立撤销并核验，不会继续装钥匙"
+    fi
+  else
+    [ ! -e "/home/$U" ] && [ ! -L "/home/$U" ] || die_remote "新账号的 home 已存在，拒绝接管"
+    ! getent group "$U" >/dev/null || die_remote "同名组已存在，拒绝隐式复用"
+  fi
+  for p in "$KEYDIR" "$DROPIN" /etc/sudoers.d; do
+    [ ! -L "$p" ] || die_remote "配置目录不可为符号链接：$p"
+    if [ -e "$p" ]; then
+      [ -d "$p" ] || die_remote "配置路径不是目录：$p"
+      [ "$(stat -c %u "$p")" = 0 ] || die_remote "配置目录必须由 root 拥有：$p"
+      mode=$(stat -c %a "$p")
+      [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die_remote "无法核验配置目录权限：$p"
+      (( (8#$mode & 0022) == 0 )) || die_remote "配置目录不能允许组或其他用户写入：$p"
+    fi
+  done
+  for p in "$KEYDIR/$U" "$SUDOERS" "$DROPIN/10-claudeops.conf"; do
+    [ ! -L "$p" ] || die_remote "配置文件不可为符号链接：$p"
+    [ ! -e "$p" ] || [ -f "$p" ] || die_remote "配置路径不是普通文件：$p"
+  done
+  KEYS=$(dec "$KEYS_B64"); WANT_SSH=$(dec "$SSHD_B64"); WANT_SUDO=$(dec "$SUDO_B64")
+  if [ "$ROLE" = test ]; then
+    # stdin validation makes even a preview free of target-file writes.
+    printf '%s\n' "$WANT_SUDO" | visudo -cf /dev/stdin >/dev/null \
+      || die_remote "sudoers 模板校验失败"
   fi
 fi
-if id "$U" >/dev/null 2>&1; then
-  # '!' 开头的密码在 UsePAM no 的机器上会连公钥一起拒掉；'*' 只是“没有密码”。
-  if [ "$(getent shadow "$U" | cut -d: -f2)" != '*' ]; then
-    act "把 $U 的密码设成不可用（*）" && usermod -p '*' "$U"
-  fi
+if [ "$APPLY" = 0 ]; then
+  say 将要 "创建/核验专用账号、授权公钥、限定 sshd 和角色 sudoers；任一步失败回滚本事务"
+  say 提示 "回滚会终止专用账号已有会话及 UID 进程，不是无中断操作"
+  say 提示 "apply 需要 flock、systemd-run、活动 systemd ssh 服务和独立管理员登录"
+  exit 0
+fi
+command -v flock >/dev/null || die_remote "apply 需要 flock"
+command -v systemd-run >/dev/null && [ -d /run/systemd/system ] \
+  || die_remote "apply 需要 systemd 定时回滚支持；未做更改"
+[ ! -L "$BASE" ] || die_remote "事务目录不能为符号链接"
+if [ -d "$BASE" ]; then
+  [ "$(stat -c %u "$BASE")" = 0 ] || die_remote "事务目录必须由 root 拥有"
+fi
+[ ! -L "$BASE/lock" ] || die_remote "锁文件不能为符号链接"
+install -d -o root -g root -m 0700 "$BASE"
+exec 9>"$BASE/lock"
+flock -n 9 || die_remote "另一引导/回滚操作正在执行"
+if [ -f "$BASE/active" ]; then
+  prior=$(cat "$BASE/active")
+  [ ! -f "$BASE/$prior/pending" ] || die_remote "上一事务尚未确认或回滚，拒绝覆盖它"
+fi
+# A different transaction may have completed after our read-only preflight.
+# Never act on stale account existence: rollback must not delete its account.
+NOW_UID=
+if id "$U" >/dev/null 2>&1; then NOW_UID=$(id -u "$U"); fi
+[ "$NOW_UID" = "$PRE_UID" ] || die_remote "等待锁期间账号存在性或 UID 已变化；未修改授权，请重新预检"
+if [ "$MODE" = lock ]; then
+  [ "$EXISTED" = 1 ] || { say 跳过 "账号不存在"; exit 0; }
+  usermod --expiredate 1 "$U"
+  if [ -f "$KEYDIR/$U" ]; then mv "$KEYDIR/$U" "$KEYDIR/$U.disabled-$(date +%s)-$$"; fi
+  pkill -KILL -u "$U" 2>/dev/null || true
+  say 完成 "已封禁专用账号；已提权任务需另行核查"
+  exit 0
+fi
+# Repeat account checks under the lock before taking a snapshot. Unrelated
+# manual administrator edits must not race this transaction.
+if [ "$EXISTED" = 1 ]; then
+  check_groups "$(id -nG "$U")"
+  [ "$(getent shadow "$U" | cut -d: -f2)" = '*' ] || die_remote "等待锁期间专用账号密码状态变化"
   expiry=$(getent shadow "$U" | cut -d: -f8)
-  if [ -n "$expiry" ] && [ "$expiry" -le "$(( $(date +%s) / 86400 ))" ]; then
-    if [ "$UNLOCK" = 1 ]; then
-      act "解除 $U 的过期（之前急停封过）" && usermod --expiredate '' "$U"
-    else
-      # 直接停下：封禁状态下连公钥都不该重新装回去。
-      fail "$U 处于封禁（过期）状态，这次什么都没改。确认要恢复时加 --unlock"
-      exit 3
-    fi
+  if [ -n "$expiry" ] && [ "$expiry" -le "$(( $(date +%s) / 86400 ))" ] && [ "$UNLOCK" != 1 ]; then
+    die_remote "账号已过期；确认恢复后使用 --unlock"
   fi
-  for g in $(id -nG "$U"); do
-    case $g in sudo|wheel|admin|root|docker|lxd|libvirt|disk|shadow)
-      fail "$U 在 $g 组里，这个组等于 root 权限。请手工移出：gpasswd -d $U $g" ;;
-    esac
-  done
-  for g in ${EXTRA_GROUPS//,/ }; do
-    if ! getent group "$g" >/dev/null; then say 跳过 "组 $g 在这台机器上不存在"; continue; fi
-    if ! id -nG "$U" | tr ' ' '\n' | grep -qx "$g"; then
-      act "把 $U 加进 $g 组" && usermod -aG "$g" "$U"
-    fi
-  done
-fi
-
-# 2. 公钥：放在 root 管理的目录，账号自己改不了 -------------------------------
-KEYS=$(dec "$KEYS_B64")
-if [ ! -d "$KEYDIR" ]; then act "创建 $KEYDIR" && install -d -o root -g root -m 0755 "$KEYDIR"; fi
-if same_content "$KEYDIR/$U" "$KEYS"; then
-  say 已有 "$KEYDIR/$U 和模板一致"
-elif act "写入 $KEYDIR/$U（$(printf '%s\n' "$KEYS" | grep -c .) 把控制机公钥，限定来源 $CONTROL_IP）"; then
-  put_file "$KEYDIR/$U" "$KEYS" 0644
-fi
-
-# 3. sudoers：只有测试机有，生产机确保没有 ------------------------------------
-SUDOERS=/etc/sudoers.d/$U
-if [ "$ROLE" = test ]; then
-  WANT=$(dec "$SUDO_B64")
-  if same_content "$SUDOERS" "$WANT"; then
-    say 已有 "$SUDOERS 和模板一致"
-  else
-    command -v visudo >/dev/null || { fail "没有 visudo，装不了 sudoers"; exit 3; }
-    check=$(mktemp); printf '%s\n' "$WANT" > "$check"
-    if ! visudo -cf "$check" >/dev/null; then
-      rm -f "$check"; fail "sudoers 模板没通过 visudo -cf，没安装"
-    else
-      rm -f "$check"
-      if act "安装 $SUDOERS（白名单命令，见模板）"; then
-        backup=
-        if [ -f "$SUDOERS" ]; then backup=$(mktemp); cp -p "$SUDOERS" "$backup"; fi
-        # 带点的文件名会被 #includedir 忽略，所以先写成 .claudeops.XXXX 再改名。
-        put_file "$SUDOERS" "$WANT" 0440
-        if ! visudo -c >/dev/null 2>&1; then
-          if [ -n "$backup" ]; then mv -f "$backup" "$SUDOERS"; else rm -f "$SUDOERS"; fi
-          fail "装上后 visudo -c 不通过，已撤回"
-        fi
-        rm -f "${backup:-/nonexistent}"
-      fi
-    fi
-  fi
+  if LC_ALL=C sudo -n -l -U "$U" >/dev/null 2>&1; then die_remote "专用账号已有 sudo 授权；未修改授权"; fi
 else
-  if [ -f "$SUDOERS" ]; then
-    act "删除 $SUDOERS（生产机不给这个账号 sudo）" && rm -f "$SUDOERS"
-  fi
-  if id "$U" >/dev/null 2>&1 && sudo -n -l -U "$U" 2>/dev/null | grep -q 'may run the following'; then
-    fail "$U 在这台生产机上还能 sudo（来自别的 sudoers 规则），请手工清掉：sudo -l -U $U"
-  fi
+  [ ! -e "/home/$U" ] && [ ! -L "/home/$U" ] || die_remote "等待锁期间 home 出现；拒绝接管"
+  ! getent group "$U" >/dev/null || die_remote "等待锁期间同名组出现；拒绝复用"
 fi
-
-# 4. sshd drop-in ---------------------------------------------------------
-if [ "$HARDEN" = 1 ]; then
-  home=$(getent passwd "$ADMIN" | cut -d: -f6)
-  if [ "$ADMIN" = root ]; then
-    fail "你是用 root 登录的，--harden 会禁止 root 登录，下次就进不来了。先建一个有 sudo 的普通账号再加固"
-    HARDEN=0
-  elif [ ! -s "$home/.ssh/authorized_keys" ]; then
-    fail "$ADMIN 没有 ~/.ssh/authorized_keys，看起来是用密码登录的，--harden 会禁掉密码登录。先配好公钥再加固"
-    HARDEN=0
-  fi
+STATE=$(mktemp -d "$BASE/txn.XXXXXXXX")
+TXN=${STATE##*/}
+UNIT=claudeops-rollback-${TXN#txn.}
+mkdir "$STATE/backup"
+printf '%s\n' "$TXN" > "$BASE/active"
+printf '%s\n' "$UNIT" > "$STATE/unit"
+if [ "$EXISTED" = 1 ]; then
+  id -G "$U" > "$STATE/groups"
+  getent shadow "$U" | cut -d: -f8 > "$STATE/expiry"
 fi
-
-files=("10-claudeops.conf")
-contents=("$(dec "$SSHD_B64")")
-if [ "$HARDEN" = 1 ]; then files+=("05-hardening.conf"); contents+=("$(dec "$HARDEN_B64")"); fi
-
-changed=()
-for i in "${!files[@]}"; do
-  if same_content "$DROPIN/${files[$i]}" "${contents[$i]}"; then
-    say 已有 "$DROPIN/${files[$i]} 和模板一致"
-  else
-    changed+=("$i")
-  fi
-done
-
-if [ ${#changed[@]} -gt 0 ] && [ "$FAILED" = 0 ]; then
-  names=$(for i in "${changed[@]}"; do printf '%s ' "${files[$i]}"; done)
-  if act "安装 sshd drop-in：${names}（先 sshd -t 校验，再重载 sshd）"; then
-    # backup 和 rollback.sh 只有 root 能动；confirm/ 归你的登录账号，确认时不用再 sudo。
-    install -d -m 0755 "$STATE"; install -d -m 0700 "$STATE/backup"
-    install -d -m 0700 -o "$ADMIN" "$STATE/confirm"
-    rollback="$STATE/rollback.sh"
-    { echo '#!/bin/sh'; echo "# 自动生成：还原 $(date '+%F %T') 之前的 sshd drop-in"; } > "$rollback"
-    for i in "${changed[@]}"; do
-      f=$DROPIN/${files[$i]}
-      if [ -f "$f" ]; then
-        cp -p "$f" "$STATE/backup/${files[$i]}"
-        echo "cp -p '$STATE/backup/${files[$i]}' '$f'" >> "$rollback"
-      else
-        echo "rm -f '$f'" >> "$rollback"
-      fi
-      install -d -m 0755 "$DROPIN"
-      put_file "$f" "${contents[$i]}" 0644
-    done
-    cat >> "$rollback" <<EOF2
-reloaded=0
-for unit in ssh sshd; do
-  if systemctl is-active --quiet "\$unit" 2>/dev/null; then systemctl reload "\$unit"; reloaded=1; break; fi
-done
-if [ "\$reloaded" = 0 ] && [ -r /run/sshd.pid ]; then kill -HUP "\$(cat /run/sshd.pid)"; fi
-rm -f '$PENDING'
-logger -t claudeops-bootstrap "rolled back sshd drop-ins" 2>/dev/null || true
-EOF2
-    chmod 0700 "$rollback"
-
-    if ! "$SSHD" -t; then
-      sh "$rollback" >/dev/null 2>&1 || true
-      fail "sshd -t 没通过，已还原，sshd 没有重载"
+# Generate a root-only transaction controller. Both commit and rollback use
+# the global lock, so a delayed timer can never undo a committed/new batch.
+{
+  printf '#!/usr/bin/env bash\nset -euo pipefail\numask 077\n'
+  printf 'STATE=%q\nBASE=%q\nU=%q\nUNIT=%q\nEXISTED=%q\n' "$STATE" "$BASE" "$U" "$UNIT" "$EXISTED"
+  printf 'ADMIN=%q\nPRE_UID=%q\n' "$ADMIN" "$PRE_UID"
+  cat <<'CONTROL'
+if [ "${2:-}" != locked ]; then exec 9>"$BASE/lock"; flock -x 9; fi
+[ -f "$STATE/pending" ] || { [ -f "$STATE/committed" ] && [ "${1:-}" = commit ]; exit $?; }
+if [ "${1:-}" = commit ]; then
+  mv "$STATE/pending" "$STATE/committed"
+  systemctl stop "$UNIT.timer" >/dev/null 2>&1 || true
+  exit 0
+fi
+[ "${1:-}" = rollback ] || exit 2
+# First disable this account while restoring files and its original state.
+if id "$U" >/dev/null 2>&1; then
+  uid=$(id -u "$U")
+  [ "$uid" != 0 ] && [ "$uid" != "$(id -u "$ADMIN")" ] || exit 3
+  [ -z "$PRE_UID" ] || [ "$uid" = "$PRE_UID" ] || exit 3
+  usermod --expiredate 1 "$U"
+  # Expiry does not terminate established sessions. Kill this dedicated UID
+  # before restoring authorization; root/systemd jobs need separate cleanup.
+  pkill -KILL -u "$uid" 2>/dev/null || true
+fi
+CONTROL
+  # Restore exactly the managed files, not all of /etc or shared account DBs.
+  for f in "$KEYDIR/$U" "$SUDOERS" "$DROPIN/10-claudeops.conf"; do
+    key=$(printf '%s' "$f" | tr / _)
+    if [ -f "$f" ]; then
+      cp -p "$f" "$STATE/backup/$key"
+      printf 'cp -p -- %q %q\n' "$STATE/backup/$key" "$f"
     else
-      # 生效值检查：从控制机来是公钥 + root 管理的 keys 文件；从别处来公钥被关掉。
-      eff_ok=$("$SSHD" -T -C "user=$U,host=probe,addr=$CONTROL_PROBE,laddr=127.0.0.1,lport=22" | grep -ci '^authorizedkeysfile /etc/ssh/authorized_keys/%u$' || true)
-      eff_deny=$("$SSHD" -T -C "user=$U,host=probe,addr=192.0.2.254,laddr=127.0.0.1,lport=22" | grep -ci '^pubkeyauthentication no$' || true)
-      if [ "$eff_ok" != 1 ] || [ "$eff_deny" != 1 ]; then
-        sh "$rollback" >/dev/null 2>&1 || true
-        fail "装上后 sshd -T 显示的生效值不对（可能有别的配置抢先生效），已还原"
-      else
-        # 定时回滚：本机确认前它一直等着；确认就是删掉 pending 文件。
-        touch "$PENDING"; chown "$ADMIN" "$PENDING"
-        if [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
-          systemd-run --quiet --collect --unit "claudeops-rollback-$$" --on-active="$TIMEOUT" \
-            /bin/sh -c "[ -e '$PENDING' ] && sh '$rollback'" >/dev/null
-        else
-          setsid nohup sh -c "sleep $TIMEOUT; [ -e '$PENDING' ] && sh '$rollback'" >/dev/null 2>&1 < /dev/null &
-        fi
-        reload_sshd
-        SSHD_CHANGED=1
-        say 等待 "sshd 已重载。${TIMEOUT} 秒内没收到确认会自动还原"
-      fi
+      printf 'rm -f -- %q\n' "$f"
+    fi
+  done
+  for d in "$KEYDIR" "$DROPIN" /etc/sudoers.d; do
+    if [ ! -d "$d" ]; then printf 'rmdir -- %q 2>/dev/null || true\n' "$d"; fi
+  done
+  cat <<'CONTROL'
+if [ "$EXISTED" = 1 ]; then
+  # The primary group was never modified; restore supplementary groups only.
+  primary=$(id -g "$U")
+  groups=$(tr ' ' '\n' < "$STATE/groups" | grep -vx "$primary" | paste -sd, - || true)
+  usermod -G "$groups" "$U"
+  expiry=$(cat "$STATE/expiry")
+  usermod --expiredate "$expiry" "$U"
+else
+  if id "$U" >/dev/null 2>&1; then
+    userdel -r "$U"
+  fi
+  # userdel may already remove the private group.
+  if getent group "$U" >/dev/null; then groupdel "$U"; fi
+fi
+for unit in ssh sshd; do
+  if systemctl is-active --quiet "$unit"; then systemctl reload "$unit"; break; fi
+done
+mv "$STATE/pending" "$STATE/rolled-back"
+systemctl stop "$UNIT.timer" >/dev/null 2>&1 || true
+logger -t claudeops-bootstrap "rolled back transaction ${STATE##*/}" 2>/dev/null || true
+CONTROL
+} > "$STATE/control.sh"
+chmod 0700 "$STATE/control.sh"
+touch "$STATE/pending"
+# Arm recovery BEFORE the first account/key/sudoers/sshd mutation.
+if ! systemd-run --quiet --collect --unit "$UNIT" --on-active="$TIMEOUT" \
+  /bin/bash "$STATE/control.sh" rollback; then
+  rm -f "$STATE/pending"; die_remote "无法启动回滚定时器；没有修改账号或授权"
+fi
+ARMED=1
+on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [ "$ARMED" = 1 ] && [ "$rc" != 10 ]; then
+    if ! bash "$STATE/control.sh" rollback locked; then
+      say 错误 "自动回滚失败；已保留事务和定时器，请立即人工核查 $STATE"
     fi
   fi
-fi
-
-if [ "$HARDEN" = 1 ] && [ "$APPLY_N" = 1 ] && [ "$FAILED" = 0 ]; then
-  # 先存下来再 grep：grep -q 提前退出会让 sshd 收到 SIGPIPE，在 pipefail 下被当成失败。
-  eff=$("$SSHD" -T -C "user=$ADMIN,host=probe,addr=192.0.2.254,laddr=127.0.0.1,lport=22")
-  printf '%s\n' "$eff" | grep -qi '^permitrootlogin no$' \
-    || say 提示 "PermitRootLogin 的生效值不是 no，有更早的配置覆盖了 05-hardening.conf，请检查"
-fi
-
-# 5. 主机指纹，给 ssh-mcp 的 trustedHostKey 用 ----------------------------------
+  exit "$rc"
+}
+trap on_exit EXIT
+if [ "$EXISTED" = 0 ]; then useradd -m -U -s /bin/bash -p '*' -c 'ssh-mcp (Claude)' "$U"; fi
+if [ "$UNLOCK" = 1 ]; then usermod --expiredate '' "$U"; fi
+[ -z "$EXTRA_GROUPS" ] || usermod -aG "$EXTRA_GROUPS" "$U"
+check_groups "$(id -nG "$U")"
+for d in "$KEYDIR" "$DROPIN" /etc/sudoers.d; do
+  [ -d "$d" ] || install -d -o root -g root -m 0755 "$d"
+done
+put_file "$KEYDIR/$U" "$KEYS" 0644
+if [ "$ROLE" = test ]; then put_file "$SUDOERS" "$WANT_SUDO" 0440; else rm -f "$SUDOERS"; fi
+visudo -c >/dev/null
+put_file "$DROPIN/10-claudeops.conf" "$WANT_SSH" 0644
+"$SSHD" -t
+# Validate the effective keys path and authentication constraints, not just syntax.
+eff=$("$SSHD" -T -C "user=$U,host=probe,addr=$CONTROL_PROBE,laddr=127.0.0.1,lport=22")
+printf '%s\n' "$eff" | grep -qx 'authorizedkeysfile /etc/ssh/authorized_keys/%u'
+printf '%s\n' "$eff" | grep -qx 'authenticationmethods publickey'
+printf '%s\n' "$eff" | grep -qx 'passwordauthentication no'
+eff_deny=$("$SSHD" -T -C "user=$U,host=probe,addr=192.0.2.254,laddr=127.0.0.1,lport=22")
+printf '%s\n' "$eff_deny" | grep -qx 'pubkeyauthentication no'
+reload_sshd
 if [ -r /etc/ssh/ssh_host_ed25519_key.pub ]; then
   printf 'FINGERPRINT %s\n' "$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')"
 fi
-
-[ "$FAILED" = 0 ] || exit 3
-[ "$SSHD_CHANGED" = 0 ] || exit 10
-exit 0
+printf 'TRANSACTION %s\n' "$TXN"
+say 等待 "独立管理员新连接确认；否则定时回滚本事务的账号和授权变更"
+exit 10
 REMOTE
 }
 
@@ -415,6 +447,7 @@ while read -r name target role extra <&3 || [ -n "${name:-}" ]; do
   [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
   case ${role:-} in prod|test) ;; *) die "$name 的角色要写 prod 或 test" ;; esac
   [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die "profile 名 $name 只能用字母、数字、点、下划线和连字符"
+  case $target in -*|'') die "SSH 目标不能为空或以 - 开头" ;; esac
   n=$((n + 1))
 
   sock="$SOCKDIR/$n.sock"
@@ -437,16 +470,22 @@ while read -r name target role extra <&3 || [ -n "${name:-}" ]; do
   case $rc in
     0) if [ "$APPLY" = 1 ]; then RESULTS+=("$name  完成"); else RESULTS+=("$name  预览完成（只读取，没有修改）"); fi ;;
     10)
+      txn=$(sed -n 's/^TRANSACTION \(txn\.[A-Za-z0-9]*\)$/\1/p' "$LOG" | tail -1)
+      if [ -z "$txn" ]; then RESULTS+=("$name  失败：缺少事务标识，等待远端定时回滚"); continue; fi
+      controller="/run/claudeops-bootstrap/$txn/control.sh"
       # 用一条全新的连接（不复用主连接）证明你还能登录，再确认；否则马上回滚。
       if ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} -o ControlPath=none -o ControlMaster=no -o ConnectTimeout=20 "$target" true; then
-        ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} -o ControlPath="$sock" "$target" 'rm -f /run/claudeops-bootstrap/confirm/pending' </dev/null
-        RESULTS+=("$name  完成（sshd 已重载，新连接验证通过）")
+        if ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} -o ControlPath="$sock" "$TTY" "$target" "$SUDO_SH \$S bash '$controller' commit"; then
+          RESULTS+=("$name  完成（独立管理员连接通过，事务已确认）")
+        else
+          RESULTS+=("$name  失败：确认未成功，保留定时回滚；请核查事务状态")
+        fi
       else
-        echo "  新连接登录失败，正在通过原连接回滚 sshd ..." >&2
-        if ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} -o ControlPath="$sock" "$TTY" "$target" "$SUDO_SH \$S sh /run/claudeops-bootstrap/rollback.sh"; then
+        echo "  新连接登录失败，正在通过原连接回滚本事务 ..." >&2
+        if ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} -o ControlPath="$sock" "$TTY" "$target" "$SUDO_SH \$S bash '$controller' rollback"; then
           RESULTS+=("$name  已回滚：重载 sshd 后新连接登不上，配置已还原")
         else
-          RESULTS+=("$name  回滚命令没跑成，远端会在 ${CONFIRM_TIMEOUT} 秒内自动还原；到点后再试登录，别关掉现在的终端")
+          RESULTS+=("$name  回滚命令没跑成，远端已安排定时回滚；须通过控制台核查结果，别关掉现在的终端")
         fi
       fi
       ;;

@@ -118,9 +118,10 @@ prod = ["read-only"]
     expect(policy.evaluate('npm install', getProfile(config, 'prod-web')).decision)
       .toBe('deny');
 
-    // admin/staging is untouched — a role-depth merge would have wiped it.
+    // admin/staging still holds safe — a role-depth merge would have wiped it.
+    // Its non-read-only command now reaches approval rather than a role denial.
     expect(policy.evaluate('npm install', getProfile(config, 'staging-web')).decision)
-      .toBe('allow');
+      .toBe('require-approval');
 
     // And another role entirely is untouched.
     expect(policy.evaluate('ls -la', getProfile(config, 'prod-readonly')).decision)

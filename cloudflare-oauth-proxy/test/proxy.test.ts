@@ -66,6 +66,9 @@ describe('missingSettings', () => {
     expect(missingSettings({ ...env, PUBLIC_URL: 'https://proxy.example.workers.dev/' })).toHaveLength(1);
     expect(missingSettings({ ...env, PUBLIC_URL: 'http://proxy.example.workers.dev' })).toHaveLength(1);
   });
+  it.each(['http://origin.example.com/', 'https://user:pass@origin.example.com/', 'https://origin.example.com/?secret=1', 'https://origin.example.com/#fragment', 'not-a-url'])('refuses unsafe backend %s', (url) => {
+    expect(missingSettings({ ...env, BACKEND_URL: url })).toContain('BACKEND_URL (HTTPS endpoint, no credentials, query or fragment)');
+  });
   it('wants both halves of an Access service token or neither', () => {
     expect(missingSettings({ ...env, CF_ACCESS_CLIENT_ID: 'id' })).toHaveLength(1);
   });
@@ -106,6 +109,13 @@ describe('forwardToBackend', () => {
     expect(response.headers.get('mcp-session-id')).toBe('s1');
     expect(response.headers.get('set-cookie')).toBeNull();
     expect(await response.text()).toBe('{"ok":true}');
+  });
+
+  it('never sends secrets to an unsafe backend even when called outside the Worker entrypoint', async () => {
+    const fetchImpl = backend(new Response(null));
+    const result = await forwardToBackend(new Request('https://p/mcp'), { ...env, BACKEND_URL: 'http://origin.example.com/' }, owner, fetchImpl);
+    expect(result.status).toBe(503);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('adds the Access service token when configured', async () => {

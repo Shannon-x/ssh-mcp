@@ -750,10 +750,10 @@ describe('final review: viewer holds safe on dev — the engine the docs must de
     transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
   } as unknown as Profile);
 
-  it('viewer on dev ALLOWS a safe command', () => {
+  it('viewer on dev can approve a safe command, but cannot skip approval', () => {
     const evaluation = engine.evaluate('npm install', viewerOn('dev'));
     expect(evaluation.commandClass).toBe('safe');
-    expect(evaluation.decision).toBe('allow');
+    expect(evaluation.decision).toBe('require-approval');
   });
 
   it('viewer on prod DENIES the same safe command', () => {

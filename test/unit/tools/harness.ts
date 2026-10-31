@@ -16,7 +16,7 @@ import { makeProfile } from '../../fixtures/profile.js';
  * `approvalGrantTtlMs` is a config default, read live from the registry; it is accepted
  * here and served from the stub registry's `currentDefaults()`.
  */
-type ToolOpts = Omit<ToolDeps, 'server' | 'registry' | 'policy' | 'audit'> & { approvalGrantTtlMs?: number };
+type ToolOpts = Omit<ToolDeps, 'server' | 'registry' | 'policy' | 'audit'> & { approvalGrantTtlMs?: number; clientSupportsApproval?: boolean };
 
 /**
  * In-process MCP client + server over InMemoryTransport, with the SSH layer
@@ -55,7 +55,7 @@ export interface Harness {
 
 export async function createHarness(
   overrides: Partial<Profile> = {},
-  { approvalGrantTtlMs = 0, ...toolOpts }: ToolOpts = {},
+  { approvalGrantTtlMs = 0, clientSupportsApproval = true, ...toolOpts }: ToolOpts = {},
   rules: PolicyRules = DEFAULT_RULES,
 ): Promise<Harness> {
   const profile: Profile = { ...testProfile, ...overrides };
@@ -129,10 +129,10 @@ export async function createHarness(
 
   const client = new Client(
     { name: 'test-client', version: '0.0.0' },
-    { capabilities: { elicitation: {} } },
+    { capabilities: clientSupportsApproval ? { elicitation: {} } : {} },
   );
   // Stand in for the human at the approval prompt.
-  client.setRequestHandler(ElicitRequestSchema, async () => {
+  if (clientSupportsApproval) client.setRequestHandler(ElicitRequestSchema, async () => {
     approvalPrompts++;
     return approve ? { action: 'accept', content: { confirm: true } } : { action: 'decline' };
   });

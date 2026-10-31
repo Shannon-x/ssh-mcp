@@ -1,4 +1,4 @@
-import { isAllowedUser, type Env, type Props } from './config.js';
+import { isAllowedUser, isValidBackendUrl, type Env, type Props } from './config.js';
 
 /** Request headers the MCP Streamable HTTP transport needs. Everything else stays here. */
 const FORWARD_REQUEST_HEADERS = ['content-type', 'accept', 'mcp-session-id', 'mcp-protocol-version', 'last-event-id'];
@@ -16,7 +16,8 @@ function jsonRpcError(status: number, code: number, message: string): Response {
  * Forward one authenticated MCP request to ssh-mcp.
  *
  * The client's own `Authorization` header (this proxy's OAuth token) is never forwarded:
- * ssh-mcp gets the static bearer token, which never leaves the Worker.
+ * ssh-mcp gets the static bearer token over HTTPS. It is stored by both the
+ * Worker and backend, but is never returned to the MCP client.
  *
  * @param props What was sealed into the access token at sign-in. Re-checked here, so
  *   removing a login from the allowlist cuts off tokens already issued to it.
@@ -36,6 +37,10 @@ export async function forwardToBackend(
   }
   if (!['POST', 'GET', 'DELETE'].includes(request.method)) {
     return new Response(null, { status: 405, headers: { Allow: 'POST, GET, DELETE' } });
+  }
+
+  if (!isValidBackendUrl(env.BACKEND_URL)) {
+    return jsonRpcError(503, -32603, 'The backend HTTPS endpoint is not configured safely.');
   }
 
   const headers = new Headers();

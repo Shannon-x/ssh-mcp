@@ -16,6 +16,7 @@
     "changeset": "changeset",
     "version": "changeset version && node scripts/sync-server-json.mjs && node scripts/sync-lockfile-version.mjs",
     "test": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run",
+    "test:quota:processes": "npm run build && node scripts/test-quota-processes.mjs",
     "test:unit": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/unit/ test/property/",
     "test:integration": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/integration/",
     "test:watch": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest",

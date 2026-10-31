@@ -3214,6 +3214,9 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ParsedCommand {
     return { binary, fullCommand, class: 'read-only' as CommandClass };
   }
 
+  // `safe` is a legacy classification label, NOT proof of safety. Unknown
+  // programs and writes such as `touch` land here. Policy approval gates all
+  // non-read-only classes; only the reader grammar above gets a fast path.
   return { binary, fullCommand, class: 'safe' as CommandClass };
 }
 

@@ -8,7 +8,9 @@
 #   生产（prod-*）：role = "viewer"、group = "prod"、readOnly = true、approvalPolicy = "deny"。
 #     只能跑只读命令；任何改动、sudo 都直接拒绝，不弹审批。机器上也不装 sudoers，两层都锁死。
 #   测试（test-*）：role = "tester"、group = "test"（下面 [policy] 里自定义）、approvalPolicy = "ask-destructive"。
-#     只读和安全命令直接跑；删改和 sudo 每一条都要你在 Claude 里点同意，
+#     只有通过参数语法检查的只读命令直接跑；未识别命令、删改和 sudo 每条都要你在 Claude 里点同意，
+#     Claude 无法提供审批时拒绝执行，不能改成 auto 来绕过。
+#     safe 是兼容旧配置的分类名，不是“无副作用”的保证；也必须审批。
 #     sudo 还要命中机器上 /etc/sudoers.d/claudeops 的白名单才真的能执行。
 #   审批永远不设 auto，approvalGrantTtlMs = 0：同意一次只管一条命令。
 #
@@ -458,7 +460,7 @@ denylist = [
 
 # 测试机专用的角色和层级。生产用内置的 viewer + prod（只读），这里不碰。
 # privileged（sudo）在这里放开，但：
-#   - approvalPolicy = "ask-destructive" 让每条 sudo 都要你点同意；
+#   - approvalPolicy = "ask-destructive" 让每条未被证明只读的操作（含 sudo）都要你点同意；
 #   - 机器上 sudoers 只允许白名单里的几条命令。
 [policy.roleBindings.tester]
 test = ["read-only", "safe", "destructive", "privileged"]
