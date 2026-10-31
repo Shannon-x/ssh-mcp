@@ -39,66 +39,40 @@ ssh-mcp 遇到破坏性（destructive）或特权（privileged）命令时，会
 
 下面所有 `<...>` 都是占位符，换成你自己的值，不要把真实的 token、密钥、IP 提交进仓库。
 
-### 第 1 步：在每台目标主机上建低权限 SSH 用户
+### 第 1 步：在运行 ssh-mcp 的机器上建账号和密钥
 
-ssh-mcp 用这个账号登录你的主机。**不要用 root。**
-
-```bash
-sudo useradd --create-home --shell /bin/bash mcp-agent
-sudo passwd -l mcp-agent           # 禁止密码登录
-sudo install -d -m 700 -o mcp-agent -g mcp-agent /home/mcp-agent/.ssh
-```
-
-不要把它加进 `sudo`/`wheel` 组。确实需要个别特权命令时，在 `/etc/sudoers.d/` 里只放行具体命令，并在 ssh-mcp 里保持审批。
-
-在 `/etc/ssh/sshd_config` 确认 `PermitRootLogin no`、`PasswordAuthentication no`。
-
-### 第 2 步：在运行 ssh-mcp 的机器上
-
-建议单独一台小机器或你的一台 VPS，用一个专门的系统用户跑：
+建议单独一台小机器或你的一台 VPS（下面叫控制机），用一个专门的系统用户跑：
 
 ```bash
 sudo useradd --system --create-home --shell /usr/sbin/nologin sshmcp
-sudo -u sshmcp ssh-keygen -t ed25519 -N '' -f /home/sshmcp/.ssh/id_ed25519_mcp
+sudo -u sshmcp ssh-keygen -t ed25519 -N '' -C claudeops@control -f /home/sshmcp/.ssh/claudeops_ed25519
 ```
 
-把公钥加到每台目标主机的 `/home/mcp-agent/.ssh/authorized_keys`，前面加限制：
+### 第 2 步：在每台目标主机上建低权限专用账号
 
-```
-no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... sshmcp
+ssh-mcp 用这个账号（默认 `claudeops`）登录你的主机。**不要用 root。** 用 [`deploy/claudeops`](../deploy/claudeops/README.md) 里的引导脚本从你自己的电脑批量做：建账号、装控制机公钥（限定只能从控制机地址登录）、装 sshd 限制，测试机再装 sudo 白名单。它默认只预览，改 sshd 时会验证你没被锁在外面。
+
+```bash
+cd deploy/claudeops
+cp hosts.txt.example hosts.txt      # 填你的主机
+./bootstrap-hosts.sh --hosts hosts.txt --pubkey claudeops_ed25519.pub --control-ip <控制机IP>           # 预览
+./bootstrap-hosts.sh --hosts hosts.txt --pubkey claudeops_ed25519.pub --control-ip <控制机IP> --apply   # 执行
 ```
 
-安装 ssh-mcp（用这个分支构建，因为它支持从环境变量读 token）：
+脚本结尾会打印每台主机的 `trustedHostKey`，下面配置要用。
+
+回到控制机，安装 ssh-mcp（用这个分支构建，因为它支持从环境变量读 token）：
 
 ```bash
 sudo git clone https://github.com/Shannon-x/ssh-mcp /opt/ssh-mcp
 cd /opt/ssh-mcp && sudo npm ci && sudo npm run build
 ```
 
-配置文件 `/home/sshmcp/.config/ssh-mcp/config.toml`（属主必须是 `sshmcp`、权限 600，否则 ssh-mcp 拒绝加载，所以用 `sudo -u sshmcp` 去创建和编辑）：
-
-```toml
-[defaults]
-approvalMode = "ask-destructive"
-approvalGrantTtlMs = 0
-commandQuotaPerDay = 500
-
-[[profiles]]
-name = "web-1"
-host = "<目标主机地址>"
-port = 22
-user = "mcp-agent"
-auth = "key"
-keyRef = "/home/sshmcp/.ssh/id_ed25519_mcp"
-# 在目标主机上运行 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 得到
-trustedHostKey = "SHA256:<主机指纹>"
-role = "operator"
-readOnly = false
-approvalPolicy = "ask-destructive"
-```
+配置文件 `/home/sshmcp/.config/ssh-mcp/config.toml`（属主必须是 `sshmcp`、权限 600，否则 ssh-mcp 拒绝加载）。从 [`deploy/claudeops/config.toml.example`](../deploy/claudeops/config.toml.example) 开始改：生产只读、测试机删改和 sudo 逐条审批、审批永不 auto，并带了禁用命令和每日额度。
 
 ```bash
-sudo -u sshmcp chmod 600 /home/sshmcp/.config/ssh-mcp/config.toml
+sudo -u sshmcp install -D -m 600 /dev/null /home/sshmcp/.config/ssh-mcp/config.toml
+sudoedit /home/sshmcp/.config/ssh-mcp/config.toml     # 粘进模板，换成你的主机和指纹
 ```
 
 生成 bearer token，放进只有 root 能读的环境文件（不放命令行，免得在进程列表里被看到）：
@@ -120,7 +94,8 @@ After=network-online.target
 [Service]
 User=sshmcp
 EnvironmentFile=/etc/ssh-mcp/env
-ExecStart=/usr/bin/node /opt/ssh-mcp/build/index.js --transport=http --httpHost=127.0.0.1 --httpPort=3000 --config=/home/sshmcp/.config/ssh-mcp/config.toml
+ExecStart=/usr/bin/node /opt/ssh-mcp/build/index.js --transport=http --httpHost=127.0.0.1 --httpPort=3000 --config=/home/sshmcp/.config/ssh-mcp/config.toml --hostKeyMode=strict --auditTamperEvident
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 NoNewPrivileges=true
 PrivateTmp=true
@@ -236,7 +211,7 @@ curl -s https://ssh-mcp-oauth.<子域>.workers.dev/.well-known/oauth-protected-r
 - **立刻断开**：从 `ALLOWED_GITHUB_LOGINS` / `ALLOWED_GITHUB_IDS` 删掉账号并重新部署，所有已发的令牌下一次请求就会被拒。
 - **轮换 bearer**：改 `/etc/ssh-mcp/env`，`systemctl restart ssh-mcp`，再 `npx wrangler secret put BACKEND_BEARER_TOKEN`。
 - **清掉所有授权**：在 claude.ai 断开连接器；需要彻底清除时可以删掉并重建 `OAUTH_KV`。
-- **紧急关停**：`systemctl stop ssh-mcp` 或停掉 Tunnel。
+- **紧急关停**：`systemctl stop ssh-mcp` 或停掉 Tunnel。控制机本身可能出问题时，从你自己的电脑在主机侧封账号，见 [deploy/claudeops 的急停](../deploy/claudeops/README.md#急停)；控制机密钥的轮换见同一份文档的“换钥”。
 
 ## 排错
 

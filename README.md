@@ -980,6 +980,10 @@ To add the HTTP transport to claude.ai as a custom connector, which requires OAu
 [`cloudflare-oauth-proxy/`](cloudflare-oauth-proxy/README.md): a Cloudflare Worker that signs
 in one allowlisted GitHub account and forwards to this server with the bearer token held
 server-side.
+[`deploy/claudeops/`](deploy/claudeops/README.md) has the host-side templates that go with it
+(in Chinese): a config for about 30 hosts split into read-only production and approved-change
+test tiers, an sshd drop-in and a sudoers allowlist for a dedicated account, and a bootstrap
+script that installs them without locking you out.
 
 `GET /health` answers `{"healthy": true, "configured": <bool>}`. It stays `200` either way —
 `healthy` is liveness — while `configured` is false when no profile is set, which is the

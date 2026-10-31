@@ -1,0 +1,15 @@
+# bootstrap-hosts.sh 的主机清单。复制成 hosts.txt 再改，hosts.txt 不要提交（已在 .gitignore 里）。
+#
+# 每行三列，空格分隔：
+#   1. profile 名：和控制机 config.toml 里的 name 一致，脚本按它打印 trustedHostKey
+#   2. 你自己登录这台机器用的 ssh 目标：~/.ssh/config 里的别名，或 管理账号@地址
+#      这是“你”的登录方式，不是 claudeops 的
+#   3. 角色：prod（只读，不装 sudoers）或 test（装 sudo 白名单）
+#
+# 下面的地址都是占位符。
+
+prod-web-01    admin@prod-web-01.example.internal    prod
+prod-web-02    admin@prod-web-02.example.internal    prod
+prod-db-01     prod-db-01                            prod
+test-web-01    admin@test-web-01.example.internal    test
+test-ci-01     test-ci-01                            test
