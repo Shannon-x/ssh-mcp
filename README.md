@@ -965,7 +965,7 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--bearerToken` | required | Bearer token for authentication (all routes except `GET /health`) |
+| `--bearerToken` | required | Bearer token for authentication (all routes except `GET /health`). `SSH_MCP_BEARER_TOKEN` in the environment works too and keeps the token out of the process list; the flag wins when both are set |
 | `--httpPort` | 3000 | HTTP listen port |
 | `--httpHost` | 127.0.0.1 | Bind address |
 | `--rateLimit` | 0 (off) | Max authenticated requests per minute, per client (0 = unlimited) |
@@ -975,6 +975,15 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
 
 Endpoints: `POST /` (MCP Streamable HTTP), `GET /status`, `GET /health`
+
+To add the HTTP transport to claude.ai as a custom connector, which requires OAuth, see
+[`cloudflare-oauth-proxy/`](cloudflare-oauth-proxy/README.md): a Cloudflare Worker that signs
+in one allowlisted GitHub account and forwards to this server with the bearer token held
+server-side.
+[`deploy/claudeops/`](deploy/claudeops/README.md) has the host-side templates that go with it
+(in Chinese): a config for about 30 hosts split into read-only production and approved-change
+test tiers, an sshd drop-in and a sudoers allowlist for a dedicated account, and a bootstrap
+script that installs them without locking you out.
 
 `GET /health` answers `{"healthy": true, "configured": <bool>}`. It stays `200` either way —
 `healthy` is liveness — while `configured` is false when no profile is set, which is the

@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { requestApproval, APPROVAL_TIMEOUT_MS } from '../../../src/guard/elicitation.js';
 import type { PolicyEvaluation } from '../../../src/types.js';
 
@@ -197,5 +200,23 @@ describe('requestApproval', () => {
     // `confirm` is still offered so a client that wants a field has one; it is
     // no longer required, which is what turned Accept into a decline (#91).
     expect(params.requestedSchema.properties.confirm).toBeDefined();
+  });
+
+  // The mocks above stand in for the SDK. This one does not: a real client that never
+  // declared elicitation, which is what a remote connector such as claude.ai looks like
+  // when it cannot show an approval prompt. The gate has to refuse, not run.
+  it('refuses when a real client never declared elicitation support', async () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' }, { capabilities: { tools: {} } });
+    const client = new Client({ name: 'no-elicitation', version: '0.0.0' }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await requestApproval(server, 'rm -rf /tmp/x', 'prod-web-1', mockEvaluation);
+      expect(result.approved).toBe(false);
+      expect(result.unavailable).toContain('could not be asked');
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });

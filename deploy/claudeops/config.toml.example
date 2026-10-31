@@ -1,0 +1,464 @@
+# ssh-mcp 配置模板：约 30 台主机，按角色分组。
+#
+# 这是给控制机用的 ssh-mcp 配置（例如 /etc/ssh-mcp/config.toml，属主是运行 ssh-mcp 的账号，
+# 权限 600，否则 ssh-mcp 拒绝加载）。主机名、密钥路径都是占位符，换成你自己的；
+# 真实地址和指纹只放在控制机上，不要提交回仓库。
+#
+# 分组思路：
+#   生产（prod-*）：role = "viewer"、group = "prod"、readOnly = true、approvalPolicy = "deny"。
+#     只能跑只读命令；任何改动、sudo 都直接拒绝，不弹审批。机器上也不装 sudoers，两层都锁死。
+#   测试（test-*）：role = "tester"、group = "test"（下面 [policy] 里自定义）、approvalPolicy = "ask-destructive"。
+#     只读和安全命令直接跑；删改和 sudo 每一条都要你在 Claude 里点同意，
+#     sudo 还要命中机器上 /etc/sudoers.d/claudeops 的白名单才真的能执行。
+#   审批永远不设 auto，approvalGrantTtlMs = 0：同意一次只管一条命令。
+#
+# 主机指纹：建议 ssh-mcp 用 --hostKeyMode=strict 启动，这样没钉指纹的主机一律拒连。
+# bootstrap-hosts.sh 会在每台机器上读出 ed25519 指纹，按 profile 名字打印出
+# trustedHostKey = "SHA256:..." 这一行，复制到对应 profile 里即可。
+# 这里不预填假指纹：假指纹谁都匹配不上，只会让每台机器报指纹不符。
+#
+# 改完后 `kill -HUP <ssh-mcp 进程>` 或 `systemctl reload ssh-mcp` 热加载；
+# 配置写错时热加载会被拒绝，旧配置继续生效。
+
+[defaults]
+# 没指定主机时不默认连任何一台，避免模型漏写 profile 时落到生产上。
+# （不写 defaultProfile 就没有默认主机。）
+sessionMaxPerConnection = 3
+sessionIdleTimeoutMs = 300000       # 交互会话闲置 5 分钟关闭
+sessionBackgroundMaxMs = 1800000    # 后台会话最长 30 分钟
+commandTimeoutMs = 60000
+commandMaxChars = 2000
+commandMaxOutputBytes = 262144      # 单条命令输出最多 256KB，少喂给模型一些不可信文本
+connectionIdleReapMs = 600000
+commandQuotaPerDay = 300            # 每台机器 24 小时滑动窗口内最多 300 条，防止模型被带偏后刷命令
+approvalMode = "ask-destructive"    # 兜底值；下面每个 profile 都显式写了自己的 approvalPolicy
+approvalGrantTtlMs = 0              # 0 = 每条需要审批的命令都单独问，不做“同意后一段时间内免问”
+# 文件上传下载默认关闭：不设 transferRoot，sftp-upload-file / sftp-download-file 就拒绝执行。
+# transferRoot = "/srv/ssh-mcp-transfers"
+
+# ======================================================================
+# 生产 Web 前端
+# ======================================================================
+[[profiles]]
+name = "prod-web-01"
+host = "prod-web-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-web-02"
+host = "prod-web-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-web-03"
+host = "prod-web-03.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-web-04"
+host = "prod-web-04.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-web-05"
+host = "prod-web-05.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-web-06"
+host = "prod-web-06.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 生产 API 服务
+# ======================================================================
+[[profiles]]
+name = "prod-api-01"
+host = "prod-api-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-api-02"
+host = "prod-api-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-api-03"
+host = "prod-api-03.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-api-04"
+host = "prod-api-04.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 生产数据库：额度再收紧
+# ======================================================================
+[[profiles]]
+name = "prod-db-01"
+host = "prod-db-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+commandQuotaPerDay = 100
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-db-02"
+host = "prod-db-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+commandQuotaPerDay = 100
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-db-03"
+host = "prod-db-03.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+commandQuotaPerDay = 100
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-db-04"
+host = "prod-db-04.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+commandQuotaPerDay = 100
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 生产缓存
+# ======================================================================
+[[profiles]]
+name = "prod-cache-01"
+host = "prod-cache-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-cache-02"
+host = "prod-cache-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 生产负载均衡
+# ======================================================================
+[[profiles]]
+name = "prod-lb-01"
+host = "prod-lb-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-lb-02"
+host = "prod-lb-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 生产监控
+# ======================================================================
+[[profiles]]
+name = "prod-mon-01"
+host = "prod-mon-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "prod-mon-02"
+host = "prod-mon-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "prod"
+role = "viewer"
+readOnly = true
+approvalPolicy = "deny"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 测试 Web
+# ======================================================================
+[[profiles]]
+name = "test-web-01"
+host = "test-web-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "test-web-02"
+host = "test-web-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "test-web-03"
+host = "test-web-03.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 测试 API
+# ======================================================================
+[[profiles]]
+name = "test-api-01"
+host = "test-api-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "test-api-02"
+host = "test-api-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "test-api-03"
+host = "test-api-03.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 测试数据库
+# ======================================================================
+[[profiles]]
+name = "test-db-01"
+host = "test-db-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+commandQuotaPerDay = 150
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "test-db-02"
+host = "test-db-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+commandQuotaPerDay = 150
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 测试 CI 构建机
+# ======================================================================
+[[profiles]]
+name = "test-ci-01"
+host = "test-ci-01.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+[[profiles]]
+name = "test-ci-02"
+host = "test-ci-02.example.internal"   # 占位符，换成控制机能解析的地址
+user = "claudeops"
+auth = "key"
+keyRef = "/home/sshmcp/.ssh/claudeops_ed25519"
+group = "test"
+role = "tester"
+approvalPolicy = "ask-destructive"
+# trustedHostKey = "SHA256:..."   # 用 bootstrap-hosts.sh 打印的那一行替换
+
+# ======================================================================
+# 策略：自定义测试层级，并追加禁用命令
+# ======================================================================
+
+[policy]
+# 正则，区分大小写，匹配整条命令。和内置的“永不允许”列表叠加，不会替换它
+# （内置的已经挡了 rm -rf /、mkfs、dd 写盘、shutdown、curl|sh、改 cron/systemd/authorized_keys 等）。
+# 写错的正则会让 ssh-mcp 启动失败，而不是被悄悄忽略。
+denylist = [
+  # 改账号、改口令、改 sudo：这些只能你自己来
+  "\\b(useradd|userdel|usermod|groupadd|groupdel|gpasswd|passwd|chpasswd|chage|visudo|sudoedit)\\b",
+  # 常驻和自启动：crontab、systemd 单元的自启和改动
+  "\\bcrontab\\b",
+  "\\bsystemctl\\s+(enable|disable|mask|unmask|daemon-reload|edit|link|set-default|isolate)\\b",
+  # 主机防火墙和 sshd 本身
+  "\\b(iptables|ip6tables|nft|ufw|firewall-cmd)\\b",
+  "/etc/ssh/",                       # 连读也拦：sshd 配置不需要模型来看
+  # 反弹 shell 和把数据往外送：命令输出里可能夹着诱导模型外传数据的文字
+  "\\b(nc|ncat|netcat|socat|telnet)\\b",
+  "\\bcurl\\b.*\\s(-T|--upload-file|-F|--form|-d|--data[a-z-]*)\\b",
+  "\\bwget\\b.*--post-(data|file)",
+  # 不写成 \\bsftp\\b：ssh-mcp 自己的 sftp-list 等工具的命令串以 "sftp:" 开头，会被误拦
+  "\\b(scp|rsync)\\b",
+  "(^|[\\s;&|(])sftp\\s",
+  # 抹痕迹和不可逆的擦除
+  "\\bhistory\\s+-c\\b",
+  "\\b(shred|wipefs|chattr)\\b",
+  # 编排和基础设施工具：一条命令影响面太大
+  "\\b(terraform|pulumi)\\s+(apply|destroy|import)\\b",
+  "\\bkubectl\\s+(delete|drain|cordon|scale|apply|replace|patch)\\b",
+  "\\bdocker\\s+(rm|rmi|system\\s+prune|volume\\s+(rm|prune)|network\\s+rm)\\b",
+  "\\bgit\\s+push\\b.*(-f|--force)",
+]
+
+# 测试机专用的角色和层级。生产用内置的 viewer + prod（只读），这里不碰。
+# privileged（sudo）在这里放开，但：
+#   - approvalPolicy = "ask-destructive" 让每条 sudo 都要你点同意；
+#   - 机器上 sudoers 只允许白名单里的几条命令。
+[policy.roleBindings.tester]
+test = ["read-only", "safe", "destructive", "privileged"]

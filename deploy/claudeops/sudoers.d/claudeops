@@ -1,0 +1,33 @@
+# ssh-mcp 专用账号在【测试机】上的 sudo 白名单。
+#
+# 由 bootstrap-hosts.sh 装到 /etc/sudoers.d/claudeops（root:root 0440），
+# 只装在 hosts 文件里角色为 test 的机器上。生产机不装，那里的账号没有任何 sudo。
+# 安装前后都会跑 visudo -c，校验不过就不装、或立刻撤回，不会弄坏 sudo。
+#
+# __CLAUDEOPS_USER__ 是占位符，脚本安装时替换。
+#
+# 下面的命令只是示例，按你测试机上实际的服务改。写的时候守住三条：
+#   1. 写完整路径和完整参数，不用通配符。`systemctl restart *` 等于给 root。
+#   2. 不放会翻页或能开编辑器的命令：systemctl status、journalctl（默认走 less）、
+#      vi、less、more、man 都能从里面敲 !sh 拿到 root shell。看日志和状态不需要 sudo，
+#      把账号加进 systemd-journal 组就能读 journalctl（脚本的 --extra-groups）。
+#   3. 不放能写任意文件或跑任意程序的命令：tee、cp、mv、chmod、chown、bash、sh、
+#      python、find、tar、rsync、docker、kubectl 等都等于 root。
+#
+# NOEXEC 让被允许的命令不能再拉起子进程，多一层保险；systemctl 不受影响。
+
+Defaults:__CLAUDEOPS_USER__ env_reset
+Defaults:__CLAUDEOPS_USER__ secure_path="/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults:__CLAUDEOPS_USER__ !visiblepw
+Defaults:__CLAUDEOPS_USER__ log_output
+
+Cmnd_Alias CLAUDEOPS_RESTART = \
+    /usr/bin/systemctl restart nginx.service, \
+    /usr/bin/systemctl reload nginx.service, \
+    /usr/bin/systemctl restart example-app.service, \
+    /usr/bin/systemctl restart example-worker.service
+
+Cmnd_Alias CLAUDEOPS_CHECK = \
+    /usr/sbin/nginx -t
+
+__CLAUDEOPS_USER__ ALL=(root) NOPASSWD: NOEXEC: CLAUDEOPS_RESTART, CLAUDEOPS_CHECK

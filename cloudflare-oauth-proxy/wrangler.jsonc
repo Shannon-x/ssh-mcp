@@ -1,0 +1,32 @@
+// Cloudflare Worker: OAuth front door for ssh-mcp. Fill in every <...> before deploying.
+// Secrets are NOT set here. Set them with `npx wrangler secret put <NAME>`:
+//   BACKEND_BEARER_TOKEN, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
+//   and, only if the backend hostname is behind Cloudflare Access:
+//   CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ssh-mcp-oauth",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // Needed for Client ID Metadata Documents: stops the outbound metadata fetch from
+  // reaching same-zone origins directly (SSRF protection).
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": true,
+  "kv_namespaces": [
+    // Create with `npx wrangler kv namespace create OAUTH_KV` and paste the id.
+    { "binding": "OAUTH_KV", "id": "<KV_NAMESPACE_ID>" }
+  ],
+  "vars": {
+    // This Worker's own https origin, no trailing slash. The MCP URL is PUBLIC_URL + "/mcp".
+    "PUBLIC_URL": "https://ssh-mcp-oauth.<your-subdomain>.workers.dev",
+    // Where ssh-mcp's HTTP mode is reachable from Cloudflare (the Tunnel hostname).
+    "BACKEND_URL": "https://ssh-mcp-origin.<your-domain>/",
+    // Who may sign in. Logins are case-insensitive.
+    "ALLOWED_GITHUB_LOGINS": "Shannon-x",
+    // Recommended: the numeric id from https://api.github.com/users/<login>
+    "ALLOWED_GITHUB_IDS": "",
+    // claude.ai only by default. Append ",loopback" to also allow Claude Code.
+    "ALLOWED_REDIRECT_URIS": "https://claude.ai/api/mcp/auth_callback"
+  },
+  "observability": { "enabled": true }
+}
