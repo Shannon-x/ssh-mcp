@@ -102,7 +102,10 @@ async function main() {
     await startHttpServer(createMcpServer, {
       port: parseInt(argv.httpPort as string) || 3000,
       host: (argv.httpHost as string) || '127.0.0.1',
-      bearerToken: argv.bearerToken as string | undefined,
+      // The environment as well as the flag: a flag is readable by every local account
+      // through the process list, which is the wrong place for the one credential guarding
+      // every host this server can reach. The flag still wins when both are set.
+      bearerToken: (argv.bearerToken as string | undefined) || process.env.SSH_MCP_BEARER_TOKEN || undefined,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
       sessionIdleTtlMs: parseHttpSessionTtl(argv.httpSessionTtl),
       authFailureLimit: parseFailureLimit(argv.authFailureLimit),

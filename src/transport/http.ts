@@ -412,7 +412,8 @@ export async function startHttpServer(
 
   if (!bearerToken) {
     throw new OperatorError(
-      'HTTP transport requires --bearerToken. Example: --transport=http --bearerToken=secret\n' +
+      'HTTP transport requires --bearerToken (or the SSH_MCP_BEARER_TOKEN environment variable). ' +
+      'Example: --transport=http --bearerToken=secret\n' +
       'Without authentication, any network client can execute SSH commands on your hosts.',
     );
   }
