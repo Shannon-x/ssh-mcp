@@ -1,5 +1,15 @@
 # ssh-mcp
 
+## 2.23.0
+
+### Minor Changes
+
+- [`bbaaaaa`](https://github.com/tufantunc/ssh-mcp/commit/bbaaaaa83f477b1b677999c6eda5172a600b20b1) Thanks [@claude](https://github.com/claude)! - The HTTP transport reads its bearer token from `SSH_MCP_BEARER_TOKEN` when `--bearerToken` is not given, so the token no longer has to sit in the process list where every local account can read it. Adds `cloudflare-oauth-proxy/`, an optional Cloudflare Worker that puts OAuth 2.1 (GitHub sign-in, one allowlisted owner) in front of the HTTP transport so it can be added to claude.ai as a custom connector.
+
+### Patch Changes
+
+- [`9a476c3`](https://github.com/tufantunc/ssh-mcp/commit/9a476c3db3eca54827981c4855d10712f449d9c8) Thanks [@Shannon-x](https://github.com/Shannon-x)! - Keep explicitly recognized read-only commands approval-free, while gating unclassified commands in non-auto modes. Share durable per-profile quotas across HTTP sessions and restarts. Validate OAuth backend HTTPS endpoints and make fleet-bootstrap authorization changes transactional, with isolated rollback regression tests and documented deployment boundaries.
+
 ## 2.22.0
 
 ### Minor Changes
