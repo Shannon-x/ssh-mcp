@@ -10,6 +10,7 @@ import { registerTools, registerResources, getToolHashes } from './tools/registr
 import { transferForbiddenDirs } from './tools/forbidden-dirs.js';
 import { initKeychain } from './config/credential-resolver.js';
 import { getConfigPath } from './config/loader.js';
+import { CommandQuota, getQuotaPath } from './policy/quota.js';
 import { SERVER_VERSION } from './version.js';
 import { reapOnce } from './ssh/reaper.js';
 import { ConfigReloader, installSighupReload } from './config/reload.js';
@@ -63,6 +64,7 @@ async function main() {
   const registry = new ConnectionRegistry(config, hostKeyMode);
   const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
+  const quota = new CommandQuota(undefined, getQuotaPath());
 
   if ('opaUrl' in argv) {
     // Presence, not truthiness — the trap `flagEnabled` was written for. A
@@ -90,7 +92,7 @@ async function main() {
       { name: 'SSH MCP Server', version: SERVER_VERSION },
       { capabilities: { tools: {}, resources: {} } },
     );
-    registerTools(server, registry, policy, audit, { localPath, reloader });
+    registerTools(server, registry, policy, audit, { localPath, reloader, quota });
     registerResources(server, registry);
     return server;
   };

@@ -55,6 +55,17 @@ jobs:
       - name: Typecheck (src + tests)
         run: npm run typecheck
 
+      - name: Persistent quota across processes
+        run: node scripts/test-quota-processes.mjs
+
+      - name: OAuth proxy regression checks (no deployment)
+        working-directory: cloudflare-oauth-proxy
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm test
+          npm run build
+
       # docker compose rather than `services:`, because two of the test servers
       # build from local Dockerfiles (Alpine/busybox-ash and Dropbear) and one
       # mounts an init script — none of which a service container can express.

@@ -236,3 +236,15 @@ npm run build       # wrangler 打包检查，不部署
 ```
 
 本地跑完整流程需要 https（`npx wrangler dev --local-protocol https`，`PUBLIC_URL` 设成 `https://localhost:8787`）。
+
+
+## 安全部署边界与试点验收
+
+- `BACKEND_URL` 必须是固定 HTTPS 端点，不能含用户信息、查询串或片段；请求不能选择或覆盖源站。开发测试也使用 HTTPS 或模拟 fetch，不允许携带生产密钥降级 HTTP。
+- 固定 Bearer 同时保存在 Worker Secret 和后端环境文件中，Worker 会通过 HTTPS 将它发给后端；不是“只存在 Worker”。公网 Tunnel 源站应配置 Access **Service Auth**，否则泄露的 Bearer 可直接访问源站、绕过 GitHub OAuth 入口。验证不带 Access 令牌时源站拒绝访问。
+- 同时配置 GitHub 登录名与数字用户 ID，避免账号改名后旧登录名被重新注册。实际 GitHub OAuth 和 Claude 连接仍须部署后验收，单元测试不证明端到端已经可用。
+- 生产与测试最好使用独立实例、独立目标清单及凭据。每台目标独立密钥，固定主机指纹，使用无 sudo、无 docker 等高权限组的专用账号。普通账号不等于操作系统级只读；强只读需求采用服务端受限命令/固定巡检脚本，保留独立管理员救援入口。
+- 可 sudo 重启的服务，其 unit、脚本、EnvironmentFile 及父目录必须不可被运维账号写入。sudo 的 NOEXEC 不约束 systemd 管理器启动的程序。
+- 停 Worker/Tunnel 或撤销 OAuth 仅阻止后续请求，不能保证结束已执行的后台任务、sudo root 进程或 systemd 服务。急停需包括目标侧撤销授权并检查遗留任务，勿在未验证时承诺“一键全部断开”。
+- 审计日志外送到控制机不能修改的独立存储；本地哈希链不是控制机失陷后的防篡改保障。
+- 先用一台无生产数据的目标，验证未授权访问、只读快速路径、写操作审批不可用时拒绝、跨会话限额、断线回滚和恢复。不要直接对 30 台生产机器批量 apply。

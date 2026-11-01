@@ -146,11 +146,38 @@ describe('run-command — approval gate', () => {
     expect(h.execCalls).toHaveLength(0);
   });
 
-  it('runs a safe command without prompting', async () => {
+  it('blocks an unclassified write when approval is declined', async () => {
     h = await createHarness();
     h.setApproval(false);
     const res = await call('run-command', { command: 'npm install' });
+    expect(res.isError).toBe(true);
+    expect(h.execCalls).toHaveLength(0);
+    expect(h.approvalPrompts()).toBe(1);
+  });
+
+  it('executes an unclassified write only after an explicit approval', async () => {
+    h = await createHarness();
+    h.setApproval(true);
+    const res = await call('run-command', { command: 'touch /tmp/mcp-review-proof' });
     expect(res.isError).toBeFalsy();
+    expect(h.approvalPrompts()).toBe(1);
+    expect(h.execCalls.map((c) => c.command)).toEqual(['touch /tmp/mcp-review-proof']);
+  });
+
+  it('keeps a proven reader prompt-free when the client has no approval UI', async () => {
+    h = await createHarness({}, { clientSupportsApproval: false });
+    const res = await call('run-command', { command: 'df -h' });
+    expect(res.isError).toBeFalsy();
+    expect(h.execCalls).toHaveLength(1);
+    expect(h.approvalPrompts()).toBe(0);
+  });
+
+  it('fails closed for an unclassified write when the client has no approval UI', async () => {
+    h = await createHarness({}, { clientSupportsApproval: false });
+    const res = await call('run-command', { command: 'touch /tmp/mcp-review-proof' });
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res)).toContain('APPROVAL_UNAVAILABLE');
+    expect(h.execCalls).toHaveLength(0);
   });
 });
 
@@ -247,7 +274,7 @@ describe('audit records', () => {
     h.setExecResult({ stdout: '', stderr: 'boom', exitCode: 7 });
     await call('run-command', { command: 'npm install' });
     const record = h.auditRecords.at(-1);
-    expect(record.decision).toBe('allow');
+    expect(record.decision).toBe('require-approval');
     expect(record.exitCode).toBe(7);
   });
 

@@ -364,8 +364,12 @@ export class PolicyEngine {
       };
     }
 
-    const needsApproval =
-      parsed.class === 'destructive' || parsed.class === 'privileged';
+    // Only the explicit reader grammar proves that a command is read-only.
+    // The legacy `safe` class means unclassified / not proven destructive,
+    // not side-effect-free (for example `touch`, an unknown program, or a
+    // reader with rejected arguments). Keep its public name for role/config
+    // compatibility, but never let it skip the non-auto approval gate.
+    const needsApproval = parsed.class !== 'read-only';
 
     const approvalRequired = this.requiresApproval(profile, needsApproval);
 
@@ -626,7 +630,8 @@ export class PolicyEngine {
     const mode: ApprovalMode = profile.approvalPolicy;
     if (mode === 'auto') return false;
     if (mode === 'ask-all') return true;
-    // ask-destructive and deny both gate on destructive/privileged commands.
+    // The legacy ask-destructive name now gates every command not proven
+    // read-only, including the legacy `safe` class. deny uses the same gate.
     return needsApproval;
   }
 

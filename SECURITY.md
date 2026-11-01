@@ -38,7 +38,7 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 
 | Risk | Mitigation |
 |------|------------|
-| Prompt injection via tool output | Command classifier + policy engine + human-in-the-loop approval for commands classified `destructive` or `privileged` — a narrower set than it sounds, see the `ask-destructive` note below |
+| Prompt injection via tool output | Command classifier + policy engine + human-in-the-loop approval for all commands not proven `read-only` under `ask-destructive`; OS least privilege remains necessary |
 | Credential leakage via CLI args (CWE-214) | Credentials loaded from env vars / config files / SSH agent — never CLI args |
 | Sudo password in process list (CWE-522) | Sudo password piped via SSH channel stdin, not command-line `printf` |
 | Command injection via metadata | Sanitizer strips CR/LF/NUL from all metadata; `description` feature removed |
@@ -141,30 +141,18 @@ mode check, and the ordering was preserved because losing it would have been a r
 dressed as a cleanup. There is no mode that overrides a pin, and the refusal does not offer
 one.
 
-**`ask-destructive` gates less than the name suggests, and `kill` is one example rather
-than the exception.** Outside the never-allowed list, five things produce the `destructive`
-class: the pattern `/rm\s+-rf?\s+\//`, a disqualifying argument on an otherwise allowlisted
-binary (`find … -delete`, `find … -exec`), a command word this process cannot resolve
-statically (`$VAR` as the command), a program handed to an interpreter this process cannot
-read (`python3 -c`, `perl -e`, `node -e`, `php -r`, and a program arriving on a pipe), and
-the two commands this server synthesises that act on the target (`sftp:upload`,
-`session:open`). **`awk` is not among them**: its program is read by none of this, so
-`awk 'BEGIN{system("...")}'` classifies `safe` exactly as it does on 2.5.1.
-Elevation classifies `privileged` rather than `destructive`; this mode gates both. Ordinary write verbs are in none of these. Measured against the shipped classifier, all of these are `safe`,
-and `safe` raises no prompt in this mode:
+**`ask-destructive` now gates every command not proven read-only.** The historical
+mode name and `safe` class remain for configuration compatibility, but `safe` is not
+proof of safety: ordinary writes such as `touch /tmp/file`, unknown programs, service
+control and signals can receive this class. They now require approval in
+`ask-destructive`, and are refused under `deny`; they are not automatically executed.
+Only commands accepted by the explicit reader/argument grammar skip approval.
 
-```
-rm -f /etc/passwd          mv /etc/passwd /tmp/x       truncate -s0 /etc/passwd
-rm -r -f /                 rm --recursive --force /    rm -rf ~
-shred /dev/sda             systemctl stop nginx        kill -9 <pid>
-```
-
-So `ask-destructive` buys a prompt on elevation and on `rm -rf /path`. It does not buy one
-on writes, deletions spelled another way, service control, or signals. **`ask-all` is the
-mode that gates writes**, and it is the right default for a profile pointed at anything that
-matters. A `readOnly` profile, or a role whose bindings exclude `safe`, are the other two
-controls that actually cover this set — the command set, that is, not the threat-model rows
-near the top of this file.
+`ask-all` additionally prompts for readers, while an explicit `auto` remains a
+privileged operator choice that disables prompts, not a recommended deployment
+setting. Role bindings, `readOnly` and never-allowed rules still apply under every
+mode. When the client cannot complete approval, the operation is refused.
+The prompt gate is not an OS sandbox: constrain the remote account and its data access.
 
 **The blast radius is the process group, not one process.** OpenSSH answers a `signal`
 channel request with `killpg()` on the command's group (`session.c`,
@@ -188,26 +176,28 @@ dispatched but never took, and from one that could not be dispatched at all.
 
 `run-command` classifies each input on its own, but an interactive session is a persistent
 PTY shell that keeps whatever the previous input left behind. So a command word can be
-redefined by one call and used by the next, and both calls classify low:
+redefined by an approved call and used by the next. Approving the setup can change
+what a later apparently read-only command means:
 
 ```
-alias ls='sudo id'              safe        allowed
+alias ls='sudo id'              safe        approval required
 ls                              read-only   allowed — runs sudo id
 
-export PATH=/tmp/mine:$PATH     safe        allowed
+export PATH=/tmp/mine:$PATH     safe        approval required
 cat /etc/hosts                  read-only   allowed — runs /tmp/mine/cat
 
-ls() { sudo id; }               safe        allowed
+ls() { sudo id; }               safe        approval required
 ```
 
 The classifier already answers this for variables, but less strongly than "refused": `S=sudo`
 then `$S id` classifies `destructive`, because a command word containing `$` cannot be
 resolved statically. So it reaches the approval gate — prompted under
 `ask-destructive` or `ask-all`, refused outright under `deny` or where `destructive` is not
-bound for the role and tier, and allowed under `auto`. The alias,
-shell function and `PATH` cases do not even reach that: they classify `safe` or `read-only`,
-below the class that prompts, because the command word is an ordinary name and nothing about
-it looks wrong. That difference is the gap, and it is one class wide.
+bound for the role and tier, and allowed under `auto`. The alias, shell function
+and `PATH` setup also reaches approval now because `safe` is gated. However, after
+a human approves that state change, a later `read-only` name still cannot be resolved
+against the remote shell's changed state. Use `ask-all` for an approved interactive
+shell, or avoid stateful shells for routine no-prompt inspection.
 
 **This is not fixable by classifying harder.** The state lives in the remote shell, not in
 this server, and a name-based classifier cannot know what a name means on the other end.
@@ -277,9 +267,10 @@ the reader's grammar accepts. The grammar only ever decides between `read-only` 
 
 1. **Never run as root.** Create a dedicated low-privilege service account.
 2. **Use command-specific sudoers** instead of blanket `NOPASSWD: ALL`.
-3. **Enable `ask-all` approval mode** for production profiles. `ask-destructive` is the
-   shipped default but gates far less than its name suggests — see the note on it below
-   before choosing it for anything that matters.
+3. **Use `readOnly` profiles for production inspection.** `ask-destructive` keeps proven
+   read-only inspection prompt-free and gates all other command classes. Use `ask-all`
+   when intentionally granting a stateful interactive shell; never use `auto` merely
+   because your client cannot display approval prompts.
 4. **Restrict network egress** on the target host (iptables/Cilium) to prevent data exfiltration.
 5. **Use read-only profiles** (`readOnly = true`) for monitoring/observer access.
 6. **Review audit logs** regularly — all commands are logged with redaction.
@@ -339,7 +330,7 @@ is secure.
 | CC6.6 | Network access security | TOFU host key verification (per process; `trustedHostKey` to pin — see "Host key trust does not survive a restart"), RFC 9142 algorithm allow-list, `via` ProxyJump without agent forwarding |
 | CC7.1 | System monitoring | Audit log (JSONL + ECS fields), 3-layer output redaction (field/regex/entropy) |
 | CC7.2 | Detection of security events | Command classification (read-only/safe/destructive/privileged), policy denial logging |
-| CC8.1 | Change management | `approvalPolicy` modes (auto/ask-destructive/ask-all/deny), MCP elicitation for commands classified `destructive` or `privileged`; `ask-all` for every command |
+| CC8.1 | Change management | `approvalPolicy` modes (auto/ask-destructive/ask-all/deny), MCP elicitation for every non-`read-only` command under `ask-destructive`; `ask-all` for every command |
 | CC9.1 | Risk mitigation | Credential cascade (agent > keychain > env, never CLI args), config file and directory permission checks (0600/0700), ACL check on Windows |
 
 ### PCI-DSS v4.0

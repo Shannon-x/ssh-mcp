@@ -98,6 +98,18 @@ export function isAllowedRedirectUri(env: Pick<Env, 'ALLOWED_REDIRECT_URIS'>, re
   return false;
 }
 
+/** Secrets may only be sent to the operator-configured HTTPS endpoint, never
+ * to a client-supplied URL. Queries/fragments/userinfo have no role in this
+ * transport and frequently hide a misconfigured credential or destination. */
+export function isValidBackendUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && Boolean(url.hostname)
+      && !url.username && !url.password && !url.search && !url.hash
+      && !/[\\\s]/.test(value);
+  } catch { return false; }
+}
+
 /** The settings without which the Worker must not serve anything. */
 export function missingSettings(env: Partial<Env>): string[] {
   const required: (keyof Env)[] = [
@@ -106,6 +118,7 @@ export function missingSettings(env: Partial<Env>): string[] {
   ];
   const missing: string[] = required.filter((key) => !env[key]);
   if (env.PUBLIC_URL && !/^https:\/\/[^/]+$/.test(env.PUBLIC_URL)) missing.push('PUBLIC_URL (https origin, no path or trailing slash)');
+  if (env.BACKEND_URL && !isValidBackendUrl(env.BACKEND_URL)) missing.push('BACKEND_URL (HTTPS endpoint, no credentials, query or fragment)');
   if (Boolean(env.CF_ACCESS_CLIENT_ID) !== Boolean(env.CF_ACCESS_CLIENT_SECRET)) {
     missing.push('CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET (set both or neither)');
   }

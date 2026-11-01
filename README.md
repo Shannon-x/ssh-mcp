@@ -749,15 +749,22 @@ startup rather than degrading silently.
 ### Approval Modes
 
 - `auto` — no prompts (dev only!)
-- `ask-destructive` — prompt for destructive/privileged (default). Narrower than it sounds:
-  outside the never-allowed list, `destructive` is one `rm -rf /path` pattern, `find` with a
-  write/exec flag, an unresolvable command word, a program handed to an interpreter this
-  server cannot read (`python3 -c`, `perl -e`, `node -e`, a program arriving on a pipe —
-  but not `awk`, whose program is not read), and `sftp-upload`/interactive `open-session` — elevation classifies `privileged`, which also
-  prompts. Ordinary writes, service control and signals do not. See
-  [SECURITY.md](./SECURITY.md) before relying on this in production.
-- `ask-all` — prompt for every command
-- `deny` — reject destructive/privileged commands outright (no prompt)
+- `ask-destructive` — prompt for every command **not proven read-only** (default).
+  The historical mode name is retained for compatibility. Ordinary writes, unknown
+  programs, service changes, signals and the legacy `safe` class now require approval,
+  not only `destructive`/`privileged`. Known readers whose arguments pass the reader
+  grammar (for example `ls -la`, `df -h`, `uptime`, `systemctl status nginx`) keep a
+  no-prompt fast path. Unsupported reader arguments and shell composition need approval.
+  An unavailable approval UI refuses the operation rather than silently allowing it.
+- `ask-all` — prompt for every command, including readers (appropriate for stateful shells)
+- `deny` — reject every command not proven read-only outright (no prompt)
+
+`safe` is a legacy classification label meaning **not proven destructive**, not a
+proof of no side effects. Role restrictions and the never-allowed list still apply
+before approval; approving a command cannot grant a role a class it does not hold.
+These are command checks, not an OS sandbox or a guarantee that readable output
+contains no secrets. Keep target accounts least-privileged and use non-interactive
+commands for routine inspection. See [SECURITY.md](./SECURITY.md).
 
 ### Approval Grants (just-in-time)
 
@@ -785,14 +792,13 @@ fill in.
 You have **10 minutes** to answer. Past that the request expires and the command
 is refused rather than left pending, and the refusal says so; the prompt may
 still be open in your client, in which case run the command again once you are
-ready. If your client does not support elicitation at all, every destructive and
-privileged command is refused with `APPROVAL_UNAVAILABLE` naming that cause —
+ready. If your client does not support elicitation at all, every command requiring approval is refused with `APPROVAL_UNAVAILABLE` naming that cause —
 approval fails closed by design.
 
 ### Command Quota
 
 `commandQuotaPerDay` bounds how many commands a profile may run in a rolling
-24-hour window (0 = unlimited). The approval gate stops *destructive* commands
+24-hour window (0 = unlimited). The approval gate controls non-read-only commands
 and the HTTP rate limiter caps request rate, but neither bounds total work — a
 prompt-injected agent looping over allowed commands stays under both. The quota
 is the circuit breaker for that case.
@@ -801,6 +807,13 @@ Counted after policy allows a command and before it runs, so a denied command
 does not spend budget. The window slides rather than resetting at midnight,
 which would let an agent spend a full quota just before the reset and another
 immediately after.
+
+The CLI shares a durable quota store across HTTP sessions and restarts. The default
+is `quota.json` beside the audit log; set `SSH_MCP_QUOTA_FILE` to an absolute,
+service-owned persistent local path when needed. Multiple processes must share
+that path; separate hosts/NFS are not a supported global budget. Corrupt state or
+lock contention refuses execution, and crash-left locks require operator recovery
+rather than unsafe automatic lock stealing. See [state and recovery details](docs/quota-state.md).
 
 ### External Policy Engine (OPA)
 
