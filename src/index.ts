@@ -2,7 +2,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { reportFatal, OperatorError } from './errors.js';
+import { reportFatal } from './errors.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
@@ -19,22 +19,24 @@ import {
   loadAppConfig,
   aclOptionsFromArgv,
   checkRemovedFlags,
+  checkUnknownFlags,
   flagEnabled,
-  parseFailureLimit,
-  parseHttpSessionTtl,
-  parseOpaUrl,
-  parseOpaTimeout,
-  resolveHostKeyMode,
+  parseStartupFlags,
 } from './cli.js';
 
 async function main() {
   const argv = parseArgv();
+  // Removed flags first: they get the message that says what replaced them.
   checkRemovedFlags(argv);
+  checkUnknownFlags(argv);
 
   if (argv.dumpToolHashes !== undefined) {
     console.log(JSON.stringify(getToolHashes(), null, 2));
     return;
   }
+
+  // Before the config load; `parseStartupFlags` says why.
+  const { hostKeyMode, opa, http } = parseStartupFlags(argv);
 
   // The whole of it, not just `config`: the reloader needs to know where the live config
   // came from, its hash and when it was loaded.
@@ -42,7 +44,6 @@ async function main() {
   const aclOptions = aclOptionsFromArgv(argv);
   const startup = await loadAppConfig(argv, aclOptions);
   const { config } = startup;
-  const hostKeyMode = resolveHostKeyMode(argv);
   const entropyScan = flagEnabled(argv, 'auditEntropyScan');
   const tamperEvident = flagEnabled(argv, 'auditTamperEvident');
 
@@ -66,18 +67,9 @@ async function main() {
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
   const quota = new CommandQuota(undefined, getQuotaPath());
 
-  if ('opaUrl' in argv) {
-    // Presence, not truthiness — the trap `flagEnabled` was written for. A
-    // space-separated `--opaUrl http://…` stores null, so the old guard dropped it
-    // silently, and dropped any `--opaFailClosed` the operator asked for with it.
-    policy.setOpaUrl(
-      parseOpaUrl(argv.opaUrl),
-      flagEnabled(argv, 'opaFailClosed'),
-      parseOpaTimeout(argv.opaTimeoutMs),
-    );
+  if (opa) {
+    policy.setOpaUrl(opa.url, opa.failClosed, opa.timeoutMs);
     console.error(`OPA sidecar enabled: ${argv.opaUrl}`);
-  } else if (flagEnabled(argv, 'opaFailClosed')) {
-    throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
   }
 
   // One reloader for the process: every MCP server below (one under stdio, one per HTTP
@@ -109,8 +101,7 @@ async function main() {
       // every host this server can reach. The flag still wins when both are set.
       bearerToken: (argv.bearerToken as string | undefined) || process.env.SSH_MCP_BEARER_TOKEN || undefined,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
-      sessionIdleTtlMs: parseHttpSessionTtl(argv.httpSessionTtl),
-      authFailureLimit: parseFailureLimit(argv.authFailureLimit),
+      ...http,
       trustProxy: flagEnabled(argv, 'trustProxy'),
       trustedProxies: (argv.trustedProxies as string)?.split(',').map((h) => h.trim()).filter(Boolean),
       allowedHosts: (argv.allowedHosts as string)?.split(',').map((h) => h.trim()).filter(Boolean),

@@ -102,10 +102,16 @@ export abstract class Session {
     // The idle TTL alone never fires for a chatty background process, because
     // every data chunk touches lastActivity. The absolute cap is what actually
     // bounds a `tail -f`-style session.
-    if (this.maxLifetimeMs !== undefined && Date.now() - this.createdAt.getTime() > this.maxLifetimeMs) {
+    //
+    // 0 means "no cap" on both, matching the `0 = unlimited` convention the rest
+    // of the config already uses for commandMaxChars and commandQuotaPerDay. A
+    // bare `>` comparison would read 0 as "expire immediately", which is the
+    // opposite of what a caller asking for no cap intends.
+    if (this.maxLifetimeMs !== undefined && this.maxLifetimeMs > 0 &&
+        Date.now() - this.createdAt.getTime() > this.maxLifetimeMs) {
       return true;
     }
-    return Date.now() - this.lastActivity.getTime() > this.ttlMs;
+    return this.ttlMs > 0 && Date.now() - this.lastActivity.getTime() > this.ttlMs;
   }
 
   protected touch(): void {
@@ -388,6 +394,13 @@ export class BackgroundSession extends Session {
   }
 
   readOutput(lines = 50): string {
+    // Reading a live session is a liveness signal, not a no-op: a caller polling
+    // it is watching the session. Without this touch, a background command whose
+    // output is redirected to a file emits nothing on the channel, so lastActivity
+    // froze at creation, the idle reaper closed the session under the caller's
+    // feet, and monitoring was indistinguishable from abandonment — measured as a
+    // job killed at exactly the 10-minute default while it was read every minute.
+    this.touch();
     // Include the in-flight partial line so output that has not yet ended with
     // a newline is still visible to a caller polling the session.
     const all = this.partialLine ? [...this.ringBuffer, this.partialLine] : this.ringBuffer;
