@@ -1,6 +1,6 @@
 import { Client, type ClientChannel, type ConnectConfig, type ExecOptions } from 'ssh2';
 import type { ConnectionInfo, Profile, ResolvedCredentials, ExecOpts, CommandResult, SessionOpts } from '../types.js';
-import { FROZEN_ALGORITHMS } from './algorithms.js';
+import { FROZEN_ALGORITHMS, FORWARDED_ALGORITHMS } from './algorithms.js';
 import { verifyHostKey, fingerprintPublicKey, type HostKeyMode } from './host-key.js';
 import type { Session, CloseOutcome } from './session.js';
 import { SessionManager } from './session-manager.js';
@@ -10,6 +10,7 @@ import { redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
+import { appendCapped, finalizeCapped } from './output-buffer.js';
 import { OperatorError } from '../errors.js';
 
 /** Fixed text: a reload-closed connection's refusal names nothing from the config. */
@@ -313,7 +314,8 @@ export class SSHConnection {
         host: this.profile.host,
         port: this.profile.port,
         username: this.profile.user,
-        algorithms: FROZEN_ALGORITHMS as ConnectConfig['algorithms'],
+        // Over a bastion's channel, chacha20 last: see FORWARDED_ALGORITHMS (#315).
+        algorithms: (this.bastionSock ? FORWARDED_ALGORITHMS : FROZEN_ALGORITHMS) as ConnectConfig['algorithms'],
         hostVerifier: (key: Buffer) => {
           // The pin used to be checked here, as a `return false` ahead of
           // verifyHostKey. That made it reject-only: a *matching* pin fell
@@ -456,6 +458,12 @@ export class SSHConnection {
         let stdout = '';
         let stderr = '';
         const maxOutput = this.profile.maxOutputBytes;
+        // Read once per command, like maxOutput: a reload mid-stream applies to the
+        // next command, not to a buffer already trimmed the other way.
+        const truncation = this.profile.outputTruncation;
+        // Progress reports what arrived, not the buffer's length: in tail mode the
+        // buffer shrinks on every trim, and MCP progress must not go backwards.
+        let received = 0;
         let lastProgressSent = 0;
         const PROGRESS_INTERVAL = 500;
 
@@ -495,7 +503,8 @@ export class SSHConnection {
         }
 
         stream.on('data', (data: Buffer) => {
-          if (stdout.length < maxOutput) stdout += data.toString();
+          received += data.length;
+          stdout = appendCapped(stdout, data.toString(), maxOutput, truncation);
           if (opts.onProgress && Date.now() - lastProgressSent >= PROGRESS_INTERVAL) {
             lastProgressSent = Date.now();
             let tail = stdout;
@@ -504,11 +513,11 @@ export class SSHConnection {
               if (idx < 0) break;
               tail = tail.substring(idx + 1);
             }
-            opts.onProgress(stdout.length, redactText(tail.trim(), { entropyScan: true }));
+            opts.onProgress(received, redactText(tail.trim(), { entropyScan: true }));
           }
         });
         stream.stderr.on('data', (data: Buffer) => {
-          if (stderr.length < maxOutput) stderr += data.toString();
+          stderr = appendCapped(stderr, data.toString(), maxOutput, truncation);
         });
 
         stream.on('close', (code: number, signal: string) => {
@@ -518,8 +527,8 @@ export class SSHConnection {
             clearTimeout(timeoutId);
             this.lastActivity = new Date();
             resolve({
-              stdout,
-              stderr,
+              stdout: finalizeCapped(stdout, maxOutput, truncation),
+              stderr: finalizeCapped(stderr, maxOutput, truncation),
               exitCode: code,
               durationMs: Date.now() - startTime,
               profile: this.profile.name,

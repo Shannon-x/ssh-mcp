@@ -46,8 +46,10 @@ jobs:
       - run: npm ci
 
       - name: Build
-        # Also required by the e2e suite, which drives the built artifact.
-        run: npm run build
+        # Also required by the e2e suite, which drives the built artifact. With source
+        # maps, which scripts/e2e-coverage.mjs maps the server processes' coverage back
+        # to src/ through. The release builds with `npm run build`, so none reach npm.
+        run: npm run build:coverage
 
       - name: Dependency resolution check
         run: npm ls zod zod-to-json-schema @modelcontextprotocol/sdk --all
@@ -86,7 +88,7 @@ jobs:
         # Skipped on pull requests from forks, which are never given secrets.
         # Those keep pulling anonymously; the retry is what covers them.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -132,10 +134,37 @@ jobs:
           # Without this, integration tests silently skip themselves when a
           # server is unreachable and CI reports green with zero of them run.
           SSH_MCP_REQUIRE_SERVERS: "1"
+          # Every process the suite starts writes its V8 coverage here on exit, the
+          # e2e suite's server processes among them. Measured: vitest's own report is
+          # byte-identical with and without it.
+          NODE_V8_COVERAGE: ${{ runner.temp }}/e2e-v8
         # Same suite as `npm test`, with the v8 reporter attached so the run
         # that proves the code works is also the one the coverage report comes
         # from.
         run: npm run coverage
+
+      # main() runs only in the e2e suite's server processes, which in-process
+      # coverage cannot follow. Converted here, and checked like the report below: a
+      # file with nothing in index.ts would read as main() going untested again.
+      - name: Convert the e2e server processes' coverage
+        run: |
+          node scripts/e2e-coverage.mjs "$RUNNER_TEMP/e2e-v8" coverage/e2e/lcov.info
+          awk '/^SF:src\/index.ts$/{f=1} f&&/^LH:/{print; if ($0 == "LH:0") bad=1; found=1; exit} END{exit (found && !bad) ? 0 : 1}' coverage/e2e/lcov.info \
+            || { echo "coverage/e2e/lcov.info has no hit line in src/index.ts"; exit 1; }
+
+      # #315: ssh2's JavaScript ciphers, which the published Docker image runs, are not
+      # what `npm ci` gives this job — it builds ssh2's native binding. So the ProxyJump
+      # suite runs once more with the binding hidden, after proving the hook hides it, so a
+      # green run cannot have taken the native path.
+      - name: ProxyJump on ssh2's JavaScript ciphers
+        env:
+          SSH_MCP_DISABLE_MAIN: "1"
+          SSH_MCP_REQUIRE_SERVERS: "1"
+          NODE_OPTIONS: --require ./test/integration/fixtures/hide-ssh2-binding.cjs
+        run: |
+          node -e "process.exit(require('ssh2/lib/protocol/crypto.js').bindingAvailable ? 1 : 0)" \
+            || { echo "the hook did not hide ssh2's native binding"; exit 1; }
+          npx vitest --run test/integration/proxy-jump.test.ts
 
       # An empty or missing report uploads happily and renders as 0%, which is
       # indistinguishable from having no tests. Fail here instead, where the
@@ -146,11 +175,13 @@ jobs:
           test -s coverage/lcov.info || { echo "coverage/lcov.info missing or empty"; exit 1; }
           echo "lcov records: $(grep -c '^SF:' coverage/lcov.info)"
 
+      # One upload with both files, so `after_n_builds: 2` in codecov.yml still counts
+      # this job and `windows`.
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage/lcov.info
+          files: ./coverage/lcov.info,./coverage/e2e/lcov.info
 
       # Service containers surface their logs in the UI automatically; compose
       # containers do not, so a failure would otherwise be undebuggable.
@@ -371,7 +402,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           # Note what is *not* pinned here. The action ref fixes its default bundle —
           # v4.37.6's defaults.json says CLI 2.26.2 — but the action prefers a newer CLI
@@ -390,10 +421,10 @@ jobs:
           config-file: ./.github/codeql-config.yml
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/autobuild@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
 
       - name: Analyze
-        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
 
   # Build the image this repo ships, and prove it starts.
   #
@@ -425,7 +456,7 @@ jobs:
         # Skipped on pull requests from forks, which are never given secrets. Those
         # pull anonymously; the retry below is what covers them.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}

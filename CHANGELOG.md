@@ -1,5 +1,105 @@
 # ssh-mcp
 
+## 2.26.0
+
+### Minor Changes
+
+- [#329](https://github.com/tufantunc/ssh-mcp/pull/329) [`2999711`](https://github.com/tufantunc/ssh-mcp/commit/299971186ad8b54483ce7bbf6e5b4beb278f1331) Thanks [@dved123](https://github.com/dved123)! - Add `commandOutputTruncation` so operators can keep the tail of a command's output. `[defaults] commandOutputTruncation = "head" | "tail"` (per-profile `outputTruncation`) chooses which end survives `commandMaxOutputBytes`. `"tail"` keeps the end of the output, starting at the first whole line, so a `grep` over a large log no longer returns only the oldest matches; the default `"head"` keeps today's behaviour unchanged.
+
+## 2.25.1
+
+### Patch Changes
+
+- [#326](https://github.com/tufantunc/ssh-mcp/pull/326) [`a7bfd83`](https://github.com/tufantunc/ssh-mcp/commit/a7bfd8375733007b5b0bb6a310ca8d3aa520aed6) Thanks [@tufantunc](https://github.com/tufantunc)! - `--opaUrl`, `--opaTimeoutMs`, `--opaFailClosed`, `--httpSessionTtl` and `--authFailureLimit` are now checked before the config file is loaded, as `--hostKeyMode` already is. A wrong value in one of them is reported first, instead of after whatever the loader refused, which cost a second restart. The conditions are unchanged: the HTTP flags are still read only with `--transport=http`, and `--opaTimeoutMs` only with `--opaUrl`.
+
+## 2.25.0
+
+### Minor Changes
+
+- [#324](https://github.com/tufantunc/ssh-mcp/pull/324) [`ae9e7a2`](https://github.com/tufantunc/ssh-mcp/commit/ae9e7a2fae116b45f4b545d3d431ac411ac1efdf) Thanks [@tufantunc](https://github.com/tufantunc)! - Unknown command-line flags are now refused at startup instead of being silently ignored, and a likely misspelling gets a suggestion (`Unknown flag: --allowUncheckedConfigAc (did you mean --allowUncheckedConfigAcl?)`). The refusal comes before the config file is read.
+  
+  **Upgrade note:** a launch command or wrapper script that passes a flag this server does not read — a typo, or a flag from another tool — previously started anyway and now exits with status 2 and names the flag. Remove or correct it; the accepted flags are the "CLI Flags (v2)" table in the README.
+
+### Patch Changes
+
+- [#323](https://github.com/tufantunc/ssh-mcp/pull/323) [`ce50a7e`](https://github.com/tufantunc/ssh-mcp/commit/ce50a7eefccc448543d1766af1d459b920e773e7) Thanks [@tufantunc](https://github.com/tufantunc)! - An invalid `--hostKeyMode` is now reported before the config file is read, instead of after the loader has checked (and possibly refused) it, so a typo no longer costs a second restart. The Windows config-ACL messages now name the directory the server actually reads its config from, rather than the literal `%APPDATA%\ssh-mcp`, which was wrong whenever `APPDATA` is unset.
+
+## 2.24.0
+
+### Minor Changes
+
+- [#320](https://github.com/tufantunc/ssh-mcp/pull/320) [`b6cbe29`](https://github.com/tufantunc/ssh-mcp/commit/b6cbe29605342c9f5de03bb96e74970cf4435786) Thanks [@st4inl3s5](https://github.com/st4inl3s5)! - A session can now be given its own idle timeout, per call, and `0` means "no
+  cap" for the session timeouts in the config.
+  
+  `open-session` accepts `ttlMs`. It may shorten the profile's idle timeout for
+  that session. It may lengthen it only up to a ceiling the operator already set:
+  `sessionBackgroundMaxMs` for a background session. Where that cap is `0`, the
+  ceiling is the profile's own `sessionIdleTimeoutMs`, since turning the absolute
+  cap off does not turn the idle timeout off. An interactive session has no
+  absolute cap, so its ceiling is always the profile's own `sessionIdleTimeoutMs`. A call
+  above the ceiling is refused, and the refusal names the ceiling. A call cannot
+  ask for `0`: the timeout is the operator's control, and the agent can narrow
+  what the operator allows but not widen it.
+  
+  `sessionIdleTimeoutMs` / `sessionBackgroundMaxMs` in the config file, and
+  `--sessionTtl`, now accept `0` = no cap. This is the spelling
+  `commandMaxChars` and `commandQuotaPerDay` already use.
+  
+  The comparisons behind it were bare `>`, which read a literal 0 as "expire
+  immediately" — the opposite of the request — and `parseInt(x) || default` turned
+  `--sessionTtl=0` back into the 10-minute default, because 0 is falsy, not
+  invalid.
+
+### Patch Changes
+
+- [#319](https://github.com/tufantunc/ssh-mcp/pull/319) [`62fd3bb`](https://github.com/tufantunc/ssh-mcp/commit/62fd3bb693fde1e284943d96223300335653c7d7) Thanks [@st4inl3s5](https://github.com/st4inl3s5)! - Reading a live session now counts as activity.
+  
+  `lastActivity` only moved when the channel produced a byte, so a background
+  command whose output is redirected to a file — the normal way to run a long job
+  — froze its idle clock at creation. A caller polling such a session every minute
+  was indistinguishable from one that had walked away, and the idle reaper closed
+  the session (and signalled the command) at exactly the timeout: measured at
+  10m22s and 10m56s against a real host with the default 10-minute TTL, while the
+  job was being read every 90 seconds.
+
+## 2.23.1
+
+### Patch Changes
+
+- [#311](https://github.com/tufantunc/ssh-mcp/pull/311) [`517e15b`](https://github.com/tufantunc/ssh-mcp/commit/517e15b0b76c4161d8f7c75d1208e6ea191f8ea7) Thanks [@tufantunc](https://github.com/tufantunc)! - A fatal startup message longer than 64KB now reaches stderr in full on macOS. When stderr was a pipe, which is the case under the stdio transport, the message was cut off at 65,536 bytes. The write now continues until the whole message is out, and retries a full pipe for up to two seconds before it gives up.
+
+- [#316](https://github.com/tufantunc/ssh-mcp/pull/316) [`390b982`](https://github.com/tufantunc/ssh-mcp/commit/390b982598e9d13c0d7b131b9d128ee7b4ece32c) Thanks [@tufantunc](https://github.com/tufantunc)! - A `via` (ProxyJump) profile now connects when both hops are OpenSSH and ssh2's optional native crypto binding is absent. That covers the published Docker image and installs that could not build the binding. Before, the inner handshake hung after its first encrypted packet and then failed with "SSH connection ended during handshake" ([#315](https://github.com/tufantunc/ssh-mcp/issues/315)).
+  
+  The cause is in ssh2 (mscdex/ssh2#1523). Its JavaScript chacha20-poly1305 cipher corrupts the nonce when one connection is carried inside another that also uses chacha20. Connections over a bastion now offer chacha20-poly1305 last, so any other cipher both sides support is chosen first.
+  
+  A server behind a bastion that accepts only chacha20-poly1305 is still offered it. Without the native binding it still hangs, as it did before this change. Nothing that connected before stops connecting.
+
+## 2.23.0
+
+### Minor Changes
+
+- [`d930b2f`](https://github.com/tufantunc/ssh-mcp/commit/d930b2ff58e1d05d5fa2b3812fc520e5fdb69bb9) Thanks [@tufantunc](https://github.com/tufantunc)! - `fix(policy)`: the command classifier reads option values and environment assignments that carry a command — `git -c`, `apt -o`, `scp -o`, `rsync --rsync-path=`, `tar --use-compress-program=` and `GIT_SSH_COMMAND`-style prefixes — whether the value is attached with `=`, quoted, or glued to its key. A command that relied on the previous default may now prompt for approval, or be refused outright under a profile that does not grant the class it earns.
+
+### Security
+
+- Fixed [GHSA-5m7x-xwpc-pp79](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-5m7x-xwpc-pp79): twenty spellings reached class `safe` — the one class the default ask-destructive policy never prompts on, and the one an `operator` holds on `prod` — through an option value: `git -c core.pager="sudo id"`, `apt -o Dpkg::Pre-Invoke::=`, `scp -o ProxyCommand=`, `less +"!…"`, `cpan -e`, the attached `--flag=value` spellings of `rsync --rsync-path`/`--rsh` and `tar --use-compress-program`/`--to-command`, and command-bearing environment prefixes (`GIT_SSH_COMMAND="sudo id" git fetch`, `EDITOR=… crontab -e`). Each hands `sudo …` to something that runs it, while the separated spellings of the same options already classified `privileged`. The operand scan now strips a key glued to its payload, reads a value attached with `=` under the same rule as the separated one, and — for the variable names a documented consumer execs — reads the value as the command it names; an assignment under any other name stays data. Reported by @eliteaja11-dev. Affected: `<= 2.22.2`.
+
+## 2.22.2
+
+### Patch Changes
+
+- [`c8040ff`](https://github.com/tufantunc/ssh-mcp/commit/c8040ffec63c363f61f76bb10715168cee7c91ce) Thanks [@tufantunc](https://github.com/tufantunc)! - Mask short, low-entropy credentials in plaintext configuration assignments (`name=value`, UCI `option name 'value'`) during output redaction when the field name indicates a secret.
+
+### Security
+
+- Fixed [GHSA-95pj-qcm9-m3m9](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-95pj-qcm9-m3m9): every redaction layer keyed off the value's shape — known token patterns, the entropy scan, configured literal secrets — so a short, low-entropy credential under a sensitive field name (`webhook_token=abc123`, `password="demo123"`, OpenWrt `option wifi_psk 'sample123'`) passed `redactText()` unchanged into file reads, command output, session output and audit logs. Plaintext assignments whose field name indicates a secret — the last `_`/`-` segment is `password`, `passwd`, `pass`, `passphrase`, `secret`, `token` or `psk`, or the name is a known key compound (`key`, `private_key`, `api-key`, …), covering UCI `option`/`list` lines and the dotted tails of `uci show` — are now masked, while `password_min`, `PasswordAuthentication`, `persist_key` and `smtp_sasl_password_maps` stay untouched. Reported by @jbdaddy04. Affected: `<= 2.22.1`.
+
+## 2.22.1
+
+### Patch Changes
+
+- [#299](https://github.com/tufantunc/ssh-mcp/pull/299) [`42b2214`](https://github.com/tufantunc/ssh-mcp/commit/42b221483f5997f6acb684233748d76c3bc4fc8d) Thanks [@dependabot](https://github.com/apps/dependabot)! - Update OpenTelemetry to 0.300: `@opentelemetry/sdk-node` and `@opentelemetry/exporter-trace-otlp-http` go from `^0.223.0` to `^0.300.0`, and `@opentelemetry/resources` from `^2.9.0` to `^3.0.0` — a coordinated major, since sdk-node 0.300 depends on resources 3.0.0 exactly. These are the parts of this bump that change what `npm i ssh-mcp` resolves, because a caret on a 0.x version does not reach the next minor; the tree resolves `@opentelemetry/api` to 1.10.0 (was 1.9.1). Regenerating the lockfile also carries declared ranges forward: `@modelcontextprotocol/sdk` to 1.32.2, `@napi-rs/keyring` to 2.1.2, `@types/node` to 26.6.6, and the prod tree's transitive dependencies (express 5.3.0, hono 4.13.16, `@hono/node-server` 2.1.5 — past GHSA-rmxm-3fg6-px4f) within ranges this package or its dependencies already declared. `npm audit --omit=dev` reports nothing.
+
 ## 2.22.0
 
 ### Minor Changes
