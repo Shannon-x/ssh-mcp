@@ -1,5 +1,81 @@
 # ssh-mcp
 
+## 2.29.0
+
+### Minor Changes
+
+- [#347](https://github.com/tufantunc/ssh-mcp/pull/347) [`065a79b`](https://github.com/tufantunc/ssh-mcp/commit/065a79b24530d92f055865689d5eaca55775547f) Thanks [@i3laze](https://github.com/i3laze)! - Two opt-in profile settings for hosts that cannot be logged in to with the `password` method in one quick round: `keyboardInteractive` and `connectTimeoutMs`.
+
+  ssh2 only offers the `keyboard-interactive` method when `tryKeyboard` is set, and ssh-mcp never set it. Two common kinds of host were then unreachable with a correct password, both ending in `All configured authentication methods failed`:
+
+  - **VMware ESXi** with the usual hardening `PasswordAuthentication no`. sshd takes passwords only through keyboard-interactive, as one hidden `Password:` prompt, and refuses the `password` method.
+  - **Dell iDRAC7/8** accepts the password with partial success (PuTTY prints "Further authentication required") and then runs one more keyboard-interactive round with no prompts. Measured against an iDRAC7 on firmware 2.65.65.65: `none`, then `password` (partial success), then `keyboard-interactive` with no prompts, then success.
+
+  `keyboardInteractive` takes `"off"` (the default when unset), `"empty"` or `"password"`:
+
+  - `"empty"` offers the method and answers every prompt with an empty string. That covers the iDRAC. A real question gets `''`, so the login fails at once instead of waiting for a person.
+  - `"password"` does the same, except that a round of exactly one hidden prompt that asks for a password is answered with the profile's password. That covers ESXi. A one-time code, several prompts, or a prompt that echoes all still get `''`, so the password never reaches a question it was not meant for.
+
+  With either mode on, the password goes out at most once per login: by the `password` method when the server lists that method, or else by the one prompt. A wrong password is not sent a second time within the login, and the `password` method is not tried on a server that does not offer it (ESXi with `PasswordAuthentication no`), where it would only count as a failed login.
+
+  It stays off by default because every extra attempt counts against a server's failed-login limit.
+
+  `connectTimeoutMs` (default 20000, unchanged; 1000 to 600000) is the ceiling on connecting and logging in. It replaces the two fixed 20 s bounds, the handshake limit and the connect timer. That iDRAC took 10 to 40 s per login, so the fixed limit refused a login that was going to succeed. The timeout error now names the limit and the setting.
+
+  On a config reload, a change to `keyboardInteractive` closes the live connection, as a change to `auth` does. A change to `connectTimeoutMs` leaves it open and applies from the next login. Writing either default out (`"off"`, `20000`) is not a change.
+
+## 2.28.0
+
+### Minor Changes
+
+- [#336](https://github.com/tufantunc/ssh-mcp/pull/336) [`ff07689`](https://github.com/tufantunc/ssh-mcp/commit/ff0768978694f1387d5252b7648330fda7483b12) Thanks [@tyrel](https://github.com/tyrel)! - New approval mode for MCP clients that cannot show an elicitation prompt: `approvalPolicy = "client-tool"`. Under the `ask-*` modes such a client never gets to answer, so every destructive and privileged command fails with `APPROVAL_UNAVAILABLE`, and the only way through was `auto`. Under `client-tool` the client's own tool-call consent prompt is the approval. A destructive or privileged command on `run-command` is refused with `APPROVAL_VIA_TOOL` and pointed at the new `destructive-command` tool. That tool, `privileged-command`, an interactive `open-session` and the `sftp-upload`, `sftp-upload-file` and `sftp-download-file` tools run gated commands without elicitation, audited as `approver: "client-tool-consent"`. Role bindings, host groups, the denylist, OPA and quotas apply as before; on such a profile OPA sees a gated shell command as `action.tool = "destructive-command"`, so a Rego rule matched on `input.action.tool == "run-command"` needs the new name too. Opt-in and weaker than elicitation: "Always allow" on `destructive-command` in the client makes the profile behave like `auto`.
+
+  Upgrade note: `destructive-command` is listed to every client of every installation. On a profile whose `approvalPolicy` is not `client-tool` it runs nothing, not even a safe command: it is refused with `CLIENT_TOOL_ONLY`, before OPA is asked, and pointed at `run-command`. Nothing else changes for a profile that does not choose `client-tool`.
+
+## 2.27.1
+
+### Patch Changes
+
+- [#342](https://github.com/tufantunc/ssh-mcp/pull/342) [`bdc4110`](https://github.com/tufantunc/ssh-mcp/commit/bdc41106bf72dfedc55cd8f64f0bdf1a2cc05d82) Thanks [@tufantunc](https://github.com/tufantunc)! - The classifier finds the end of every `$(…)`, `<(…)` and `>(…)` in one pass over the command. It looked for each one separately, so a command with many substitutions that never close took time in proportion to the square of its length (0.8 s for 60 KB; 0.26 s now). No class and no never-allowed answer changes.
+
+## 2.27.0
+
+### Minor Changes
+
+- [`949dc85`](https://github.com/tufantunc/ssh-mcp/commit/949dc85d9679777987918a8505a7d8bcf8a58049) Thanks [@tufantunc](https://github.com/tufantunc)! - The classifier now finds the program an interpreter is handed when options stand between the interpreter and the program. A shell's `-c` is a switch, so its program is the first operand wherever `-c` stands: `sh -c -- CMD`, `sh -c -e CMD`, `sh -o errexit -c CMD` and `bash --rcfile FILE -c CMD` are classified, and checked against the never-allowed list, as `CMD`. For the other interpreters the classifier knows the options that take no value and takes every other option to have one, so an option's value no longer hides the program flag behind it (`python3 -W ignore -c CODE`, `perl -I lib -e CODE`, `node -r ./x -e CODE`, `ruby -r json -e CODE`, `php -d a=b -r CODE`, `lua -l os -e CODE`, `osascript -l JavaScript -e CODE`), nor does a cluster of flags (`perl -lane CODE`) or a program attached to its flag (`perl -e'CODE'`). `vim`, `vi`, `ex`, `view`, `nvim` and `gdb` are read with their options after operands too (`vim FILE -c CMD`, `gdb PROG -ex CMD`), and vim's `+CMD` is read as `-c CMD`. This reading applies behind a command the classifier has no table entry for as well (`unshare -m sh -c -- CMD`, `docker exec NAME python3 -W ignore -c CODE`). Before, each of these was `safe`.
+
+  More names are read as interpreters: a version after the name (`python3.11`, `perl5.36`, `php8.2`, `lua5.4`, `ksh93`), `mksh`, `pdksh`, `oksh`, `yash`, `rbash`, `posh`, `fish`, `csh`, `tcsh`, `nodejs`, `pypy`, `pypy3`, `jruby`, `luajit`, `nvim`, `rvim`, `rview`, `gview` and `gdb-multiarch`. More program flags are read: `php -B`, `-R`, `-E` and `--run`, `bun --eval`, `-p` and `--print`, and gdb's `-eval-command`, `-iex`, `-eiex` and their abbreviations with one dash or two.
+
+  Upgrade notes:
+
+  - The invocations above that ran without a prompt now follow the policy for a program handed to an interpreter: `destructive` for code the classifier does not read, and the class of the command itself for a shell's `-c`.
+  - An interpreter option the classifier does not know is taken to have a value. `python3 --some-new-flag run.py -c config.yml` is then read as `-c` handing `config.yml` to python and is `destructive`; with an option it knows (`python3 -u run.py -c config.yml`) the line keeps its class. Report such an option and it is added.
+  - `vim +q FILE`, `ex -s +'%s/a/b/' +wq FILE` and any other `+COMMAND` are `destructive`, and so is a `+/PATTERN` that holds a `|`. `vim +10 FILE`, `vim + FILE` and `vim +/pattern FILE` keep their class.
+  - `fish -c CMD`, `csh -c CMD` and `tcsh -c CMD` are `destructive` at least: their program is not read as POSIX shell text.
+  - A script's own arguments are not read: `python3 -u train.py -c config.yml`, `python3 -m gunicorn -c conf.py app` and `node server.js -p 3000` keep their class.
+
+- [`949dc85`](https://github.com/tufantunc/ssh-mcp/commit/949dc85d9679777987918a8505a7d8bcf8a58049) Thanks [@tufantunc](https://github.com/tufantunc)! - The command classifier now reads the shell's own grammar. A command inside a subshell or a brace group, in an `if`, loop or `case` block, in a function body, next to a redirection, in a `trap` action, behind `builtin`, `coproc` or `time`, in zsh's `repeat`, `foreach` and short loop forms, inside `=(…)` or `${ …; }`, in a `$(…)` that holds a quoted parenthesis, or fed to a shell as a here-string or through a pipe into a group is classified, and checked against the never-allowed list, as the command it runs. Before, most of these were classified by a word that names no program and came out `safe`.
+
+  Upgrade notes:
+
+  - Commands of these shapes that ran without a prompt now follow the policy for the command inside them. `(sudo id)` and `if true; then sudo id; fi` are `privileged`, and `{ reboot; }` is refused, exactly as `sudo id` and `reboot` are when sent on their own. Commands whose grammar holds nothing elevating or destructive keep their class: `( cd /srv && ls )`, `for f in *.log; do wc -l "$f"; done`, `{ date; uptime; } > out.txt`.
+  - A command word that the shell rewrites before running it, a glob or a brace expansion such as `./run-*.sh` or `/opt/app-{a,b}/bin/start`, is now `destructive`: the name of what runs is not in the command. Write the name out.
+  - `(( … ))` is read as commands, because `dash` runs it as a subshell. `(( $n > 5 ))` and `(( count*2 > 10 ))` are now `destructive`; `(( n > 5 ))` and `[ $((count*2)) -gt 10 ]` keep their class.
+  - A word that names an elevating or never-allowed command is read as that command wherever some shell would run it: a `case` label after the first (`case $1 in start) …;; reboot) …;; esac`), an array element (`x=(sudo reboot)`). Name the label differently, or build the array from a file.
+  - A line with a `$(…)` that holds a `case` statement (ended by `esac`, or by a `}` as zsh allows) is `destructive` at least, because shells do not agree on where such a substitution ends and nothing behind it is known to be data. The same holds for a `case` statement anywhere behind a `$(`, a backquote or a process substitution on the line (`echo "$(date)"; case "$1" in …`): whether it stands inside is what cannot be told. `v="$(case "$1" in start) echo up ;; esac)"; echo "$v"` now asks for approval. Assign from a `case` statement instead (`case "$1" in start) v=up ;; esac; echo "$v"`), which keeps its class. The text from the substitution to the line's last `)` is still read by command name with quotes ignored, so `v="$(case $1 in a) echo 1 ;; esac)"; echo "run (sudo make install) first"` is `privileged`.
+  - A line nested so deep that the classifier stops reading it (eight levels of substitutions, groups and carriers, counted along every way it reads the line) is `privileged`. This held for the class before; it now holds for the never-allowed scan too, which could stop first.
+  - A word that starts with a bracket expression is a glob to a POSIX shell, so a PowerShell cast as the first word (`[xml](Get-Content web.config)`, `[int]"5"`) is now `destructive`. A static member (`[math]::Round(1.5)`) keeps its class.
+  - A PowerShell condition or block that starts with a variable, `if ($x -gt 5) { … }` or `if (Test-Path $p) { $c = Get-Content $p }`, is now `destructive`. `if (Test-Path $p) { Remove-Item $p }` keeps its class.
+
+- [`949dc85`](https://github.com/tufantunc/ssh-mcp/commit/949dc85d9679777987918a8505a7d8bcf8a58049) Thanks [@tufantunc](https://github.com/tufantunc)! - `split --filter=COMMAND` (GNU coreutils, also installed as `gsplit`) is now read as a carrier: the command it hands to `sh -c` is classified whatever its shape, in every spelling `split` accepts — attached or detached, under any prefix from `--f` up. The command is at least `destructive`, `privileged` when the filter elevates, and the never-allowed list applies to the filter.
+
+  Upgrade note: a `split --filter` command that ran as `safe` is now asked for approval, or refused, depending on the role and tier.
+
+### Security
+
+- Fixed [GHSA-hmrp-r5wm-5mqf](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-hmrp-r5wm-5mqf): a command inside the shell's own grammar (a subshell, a brace group, after a reserved word, behind a redirection) or behind an interpreter's options (`sh -c -- CMD`, `python3 -W ignore -c CODE`) reached class `safe`, with no never-allowed match.
+- Fixed [GHSA-gpfp-xjq7-64hv](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-gpfp-xjq7-64hv): `split --filter=COMMAND` reached class `safe` when the filter held no space, with no never-allowed match. Reported by @chrispham-cyber.
+
 ## 2.26.0
 
 ### Minor Changes
