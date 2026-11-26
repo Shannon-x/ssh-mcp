@@ -1,5 +1,17 @@
 # ssh-mcp
 
+## 2.30.0
+
+### Minor Changes
+
+- [`bbaaaaa`](https://github.com/tufantunc/ssh-mcp/commit/bbaaaaa83f477b1b677999c6eda5172a600b20b1) Thanks [@claude](https://github.com/claude)! - The HTTP transport reads its bearer token from `SSH_MCP_BEARER_TOKEN` when `--bearerToken` is not given, so the token no longer has to sit in the process list where every local account can read it. Adds `cloudflare-oauth-proxy/`, an optional Cloudflare Worker that puts OAuth 2.1 (GitHub sign-in, one allowlisted owner) in front of the HTTP transport so it can be added to claude.ai as a custom connector.
+
+### Patch Changes
+
+- [#350](https://github.com/tufantunc/ssh-mcp/pull/350) [`f247641`](https://github.com/tufantunc/ssh-mcp/commit/f247641343f72495aff862b7687bace611f8b29e) Thanks [@tufantunc](https://github.com/tufantunc)! - The audit record of a call that fails after it was approved now names the approver. A failure from that point on, such as a connection dropping while an approved command runs or the daily quota refusing it, used to be recorded without one, although the command may already have changed the host. This applies to elicitation, `client-tool` and approval-grant approvals alike.
+
+- [`9a476c3`](https://github.com/tufantunc/ssh-mcp/commit/9a476c3db3eca54827981c4855d10712f449d9c8) Thanks [@Shannon-x](https://github.com/Shannon-x)! - Keep explicitly recognized read-only commands approval-free, while gating unclassified commands in non-auto modes. Share durable per-profile quotas across HTTP sessions and restarts. Validate OAuth backend HTTPS endpoints and make fleet-bootstrap authorization changes transactional, with isolated rollback regression tests and documented deployment boundaries.
+
 ## 2.29.0
 
 ### Minor Changes
