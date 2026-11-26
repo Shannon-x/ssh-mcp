@@ -146,7 +146,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 
 ---
 
-## Tools (15)
+## Tools (16)
 
 | Tool | Purpose | readOnly | destructive |
 |------|---------|:--------:|:----------:|
@@ -157,6 +157,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `read-session-output` | Read output from background sessions (e.g., `tail -f`) | ✅ | — |
 | `read-command` | Execute allowlisted read-only commands (`ls`, `cat`, `grep`, ...) | ✅ | — |
 | `run-command` | Execute arbitrary commands (destructive/privileged need approval, unless `approvalPolicy = "auto"`) | — | — |
+| `destructive-command` | Runs a shell command on a profile with `approvalPolicy = "client-tool"`, where the call is the approval; refused on any other profile (see [Approval Modes](#approval-modes)) | — | ✅ |
 | `privileged-command` | Execute with sudo (needs approval, unless `approvalPolicy = "auto"`) | — | ✅ |
 | `sftp-upload` | Upload a file via SFTP (replaces the destination unconditionally) | — | ✅ |
 | `sftp-download` | Download a file via SFTP | ✅ | — |
@@ -266,7 +267,7 @@ OpenSSH on Windows 11.
 
 | | Linux / BSD / macOS | Windows OpenSSH |
 |---|:---:|:---:|
-| `read-command`, `run-command`, `privileged-command`, `signal-process` | ✅ | ✅ |
+| `read-command`, `run-command`, `destructive-command`, `privileged-command`, `signal-process` | ✅ | ✅ |
 | `sftp-upload`, `sftp-download` | ✅ | ✅ |
 | `sftp-list` | ✅ | ✅ |
 | `sftp-upload-file`, `sftp-download-file` | ✅ | ❌ (local side unverifiable) |
@@ -301,7 +302,7 @@ commandOutputTruncation = "head"    # head | tail; see below
 connectionIdleReapMs = 900000       # 15min
 commandQuotaPerDay = 0              # 0 = unlimited; circuit breaker for runaway agents
 approvalGrantTtlMs = 0              # 0 = always prompt; see "Approval Grants"
-approvalMode = "ask-destructive"    # auto | ask-destructive | ask-all | deny
+approvalMode = "ask-destructive"    # auto | ask-destructive | ask-all | deny | client-tool
 # transferRoot = "/srv/ssh-mcp-transfers"   # enables the streaming file tools; see above
 transferMaxBytes = 268435456        # 256MB per streaming transfer
 transferTimeoutMs = 300000          # 5min with no bytes moving (idle, not total)
@@ -324,6 +325,8 @@ readOnly = false
 approvalPolicy = "ask-all"
 cert = false                        # SSH CA cert auth — auto-detects keyRef-cert.pub
 announceAgent = true                # Send AI_AGENT=ssh-mcp to this host (see below); clear it for a host you do not control
+keyboardInteractive = "off"         # "empty": answer keyboard-interactive rounds with '' (Dell iDRAC7/8); "password": also answer one hidden Password prompt with the password (VMware ESXi with PasswordAuthentication no)
+connectTimeoutMs = 20000            # ceiling on connecting and logging in, 1000 to 600000; raise it for a host with a slow login
 sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
@@ -497,9 +500,9 @@ so no tool call sees part of each. For each open connection, by profile name:
 
 | Changed on the profile | What happens |
 |---|---|
-| `role`, `group`, `approvalPolicy`, `readOnly`, `commandQuotaPerDay`, `maxChars`, `transferMaxBytes`, `transferTimeoutMs`, or the `[policy]` section | The connection stays open; the change applies from its next command |
+| `role`, `group`, `approvalPolicy`, `readOnly`, `commandQuotaPerDay`, `maxChars`, `transferMaxBytes`, `transferTimeoutMs`, `connectTimeoutMs`, or the `[policy]` section | The connection stays open; the change applies from its next command (`connectTimeoutMs` from its next login) |
 | `workdir`, `tty`, `timeout`, `maxOutputBytes`, `outputTruncation`, `announceAgent`, `sessionMaxPerConnection`, `sessionIdleTimeoutMs`, `sessionBackgroundMaxMs` | The connection stays open; the new values apply to new sessions and commands, and the report names these fields |
-| `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `cert`, `via`, `trustedHostKey` | The connection closes with its sessions; the next call connects with the new profile |
+| `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `cert`, `via`, `trustedHostKey`, `keyboardInteractive` | The connection closes with its sessions; the next call connects with the new profile |
 | the profile was removed | The connection closes with its sessions |
 
 A connection that runs through a bastion that is closing closes too, and so does anything
@@ -781,6 +784,42 @@ These are command checks, not an OS sandbox or a guarantee that readable output
 contains no secrets. Keep target accounts least-privileged and use non-interactive
 commands for routine inspection. See [SECURITY.md](./SECURITY.md).
 
+#### Clients without elicitation: `client-tool`
+
+The `ask-*` modes ask through MCP elicitation, and a client that does not support it can
+never answer, so every gated command is refused with `APPROVAL_UNAVAILABLE`. Every MCP
+client does ask the user before a tool call, though. `client-tool` uses that prompt:
+
+- `run-command` keeps running read-only and safe commands. A destructive or privileged
+  command there is refused with `APPROVAL_VIA_TOOL`, which tells the model to call
+  `destructive-command` with the same arguments.
+- `destructive-command`, `privileged-command`, an interactive `open-session`, and
+  `sftp-upload`, `sftp-upload-file` and `sftp-download-file` run gated commands without an
+  elicitation prompt: the call reaching the server is the approval. The client's prompt
+  shows the call's arguments: the command for the two shell tools, the session's name,
+  the paths for the transfers.
+- A background `open-session` and `sftp-download` are not consent: a gated command there
+  is refused with `APPROVAL_VIA_TOOL`. A background session carries commands of every
+  class, as `run-command` does, and `sftp-download` is annotated read-only, which clients
+  take as a reason not to ask.
+- Role bindings, host groups, the denylist, OPA and the command quota apply as in every
+  other mode. Only the elicitation step is replaced. OPA sees a gated shell command as
+  `action.tool = "destructive-command"`; a rule matched on `"run-command"` needs that name
+  too.
+- The audit log records these runs with `approver: "client-tool-consent"`.
+- `destructive-command` runs nothing on a profile with any other `approvalPolicy`: it is
+  refused with `CLIENT_TOOL_ONLY`, before OPA is asked, and pointed at `run-command`.
+
+In your client, always-allow `read-command` and `run-command` if you like, and keep
+**ask** on `destructive-command`, `privileged-command`, `open-session` and the transfer
+tools above. An interactive session's later commands go through `run-command` and
+`destructive-command` one by one, each classified on its own.
+
+This is weaker than elicitation, and it is opt-in for that reason. The server cannot tell
+whether a person answered the client's prompt: "Always allow" on `destructive-command`
+makes that profile behave like `auto`. Use it where the alternative would be `auto`, not
+in place of a client that can show the prompt.
+
 ### Approval Grants (just-in-time)
 
 `approvalGrantTtlMs` lets one explicit approval cover repeats of the **exact
@@ -808,7 +847,7 @@ You have **10 minutes** to answer. Past that the request expires and the command
 is refused rather than left pending, and the refusal says so; the prompt may
 still be open in your client, in which case run the command again once you are
 ready. If your client does not support elicitation at all, every command requiring approval is refused with `APPROVAL_UNAVAILABLE` naming that cause —
-approval fails closed by design.
+approval fails closed by design. See [client-tool](#clients-without-elicitation-client-tool) for the opt-in alternative.
 
 ### Command Quota
 
@@ -864,6 +903,10 @@ The request shape is modeled on the AuthZEN Access Evaluation contract:
   }
 }
 ```
+
+`action.tool` is the tool's name. On a profile with `approvalPolicy = "client-tool"`, a
+destructive or privileged shell command arrives as `"destructive-command"`, not
+`"run-command"`; a rule that matches on the tool name should name both.
 
 For the five SFTP tools, `resource` also carries three path keys: `remotePath`,
 the path as given; and `remotePathNormalized` and `remotePathWindows`, the same
@@ -1140,6 +1183,7 @@ replacement, rather than failing later as a confusing auth error.
 |----|----|-------|
 | `exec` | `read-command` | Allowlisted read-only commands. Prefer this for reads. |
 | `exec` | `run-command` | Arbitrary commands. Destructive and privileged ones go through the approval gate, unless `approvalPolicy = "auto"`. |
+| — | `destructive-command` | Under `approvalPolicy = "client-tool"`, the tool that runs destructive and privileged shell commands. Refused on any other profile. |
 | `sudo-exec` | `privileged-command` | Requires approval unless `approvalPolicy = "auto"`. Password is piped via stdin. |
 | `description` parameter | — | Removed. It was an injection vector (#44) and never reached the host. |
 
